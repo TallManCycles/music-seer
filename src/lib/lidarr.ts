@@ -1,4 +1,5 @@
-import { config, lidarrConfigured } from "./config";
+import { config } from "./config";
+import { lidarrCredentials, lidarrReady } from "./settings";
 
 export class LidarrError extends Error {
   constructor(
@@ -18,8 +19,8 @@ async function request<T>(
   path: string,
   init?: { query?: Record<string, string | number | boolean | undefined>; body?: unknown }
 ): Promise<T> {
-  const cfg = config().lidarr;
-  if (!lidarrConfigured()) {
+  const cfg = lidarrCredentials();
+  if (!lidarrReady()) {
     throw new LidarrError("Lidarr is not configured (set MUSICSEER_LIDARR_URL and API key)");
   }
   const url = new URL(`${cfg.url}/api/v1/${path.replace(/^\/+/, "")}`);
@@ -132,7 +133,7 @@ export interface LidarrStatus {
 }
 
 export async function systemStatus(): Promise<LidarrStatus> {
-  if (!lidarrConfigured()) return { ok: false, error: "not configured" };
+  if (!lidarrReady()) return { ok: false, error: "not configured" };
   try {
     const s = await request<{ version: string }>("GET", "system/status");
     return { ok: true, version: s.version };

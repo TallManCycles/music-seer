@@ -1,7 +1,8 @@
-import { config, jellyfinConfigured, lidarrConfigured } from "./config";
+import { config } from "./config";
 import * as db from "./db";
 import * as jellyfin from "./jellyfin";
 import * as lidarr from "./lidarr";
+import { jellyfinReady, lidarrReady } from "./settings";
 import { enqueueFallback, pollFallback, resolveSource } from "./ytdlp";
 import * as spool from "./spool";
 import { releaseGroupForRecording } from "./musicbrainz";
@@ -117,7 +118,7 @@ export async function submitToLidarr(requestId: number): Promise<void> {
 
   const cfg = config();
 
-  if (!lidarrConfigured()) {
+  if (!lidarrReady()) {
     db.addEvent(request.id, "warn", "Lidarr is not configured — falling back to yt-dlp");
     await startFallback(request.id, "Lidarr is not configured");
     return;
@@ -199,7 +200,7 @@ interface Availability {
  * empty library.
  */
 async function jellyfinLookup(request: MediaRequest): Promise<jellyfin.LibraryLookup | null> {
-  if (!jellyfinConfigured()) return null;
+  if (!jellyfinReady()) return null;
   try {
     return await jellyfin.findInLibrary({
       type: request.type,
@@ -231,7 +232,7 @@ async function checkAvailability(request: MediaRequest): Promise<Availability> {
   let lidarrError: string | undefined;
   let processing = false;
 
-  if (lidarrConfigured()) {
+  if (lidarrReady()) {
     const queue = await lidarr.queueDetails({
       artistId: request.lidarrArtistId,
       albumId: request.lidarrAlbumId,
@@ -417,7 +418,7 @@ export async function recheckImport(request: MediaRequest): Promise<void> {
   if (inLibrary === null) {
     // Jellyfin is not configured or is unreachable, so there is nothing to
     // confirm the import against. Say so rather than guessing.
-    const detail = jellyfinConfigured()
+    const detail = jellyfinReady()
       ? "Downloaded to the inbox; Jellyfin could not be reached to confirm the import"
       : "Downloaded to the inbox; set MUSICSEER_JELLYFIN_URL to confirm imports automatically";
     if (request.statusDetail !== detail) db.updateRequest(request.id, { statusDetail: detail });
@@ -440,7 +441,7 @@ export async function requestImportScan(requestId: number): Promise<MediaRequest
   const request = db.getRequest(requestId);
   if (!request) return null;
 
-  if (jellyfinConfigured()) {
+  if (jellyfinReady()) {
     try {
       await jellyfin.refreshLibrary();
       db.addEvent(requestId, "info", "Asked Jellyfin to rescan its libraries");
@@ -454,8 +455,8 @@ export async function requestImportScan(requestId: number): Promise<MediaRequest
     }
   }
 
-  if (!lidarrConfigured()) {
-    if (!jellyfinConfigured()) {
+  if (!lidarrReady()) {
+    if (!jellyfinReady()) {
       db.addEvent(
         requestId,
         "warn",

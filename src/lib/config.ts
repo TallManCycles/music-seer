@@ -113,8 +113,8 @@ export function loadConfig(): AppConfig {
         /* turbopackIgnore: true */ cwd,
         process.env.MUSICSEER_SPOOL_PATH ?? "./spool"
       ),
-      inboxHostPath: process.env.MUSICSEER_INBOX_HOST_PATH ?? "/mnt/nas/aaron/music-inbox",
-      configHostPath: process.env.MUSICSEER_YTDLP_CONFIG_HOST_PATH ?? "/home/aaron/docker/ytdlp",
+      inboxHostPath: process.env.MUSICSEER_INBOX_HOST_PATH ?? "/mnt/nas/Aaron/music-inbox",
+      configHostPath: process.env.MUSICSEER_YTDLP_CONFIG_HOST_PATH ?? "/mnt/nas/Aaron/ytdlp-config",
       inboxContainerPath: process.env.MUSICSEER_INBOX_CONTAINER_PATH ?? "/inbox",
       configContainerPath: process.env.MUSICSEER_YTDLP_CONFIG_CONTAINER_PATH ?? "/config",
       archive: process.env.MUSICSEER_YTDLP_ARCHIVE ?? "musicseer_archive.txt",
@@ -138,10 +138,11 @@ export function config(): AppConfig {
   return cached;
 }
 
-export function lidarrConfigured(): boolean {
+/**
+ * Note: "is Jellyfin configured?" is answered by `jellyfinReady()` in
+ * ./settings, which also considers credentials saved from the Settings page.
+ * These env-only helpers exist for the initial bootstrap and diagnostics.
+ */
+export function lidarrConfiguredFromEnv(): boolean {
   return Boolean(config().lidarr.url && config().lidarr.apiKey);
-}
-
-export function jellyfinConfigured(): boolean {
-  return Boolean(config().jellyfin.url && config().jellyfin.apiKey);
 }

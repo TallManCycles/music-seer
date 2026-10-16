@@ -7,6 +7,7 @@ const LINKS = [
   { href: "/", label: "Discover" },
   { href: "/requests", label: "Requests" },
   { href: "/status", label: "Status" },
+  { href: "/settings", label: "Settings" },
 ];
 
 export default function Nav() {

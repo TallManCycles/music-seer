@@ -69,6 +69,11 @@ docker compose up -d --build
 open http://localhost:8666
 ```
 
+Then open **Settings** in the app and paste your Jellyfin API key (Jellyfin →
+Dashboard → API Keys). You do not have to put it in `.env`: whatever you save in
+the app is stored in its database and takes precedence, so you can configure it
+from a browser on another machine without touching files on the server.
+
 Two things worth understanding before you start:
 
 1. **The app never runs yt-dlp itself.** With the default `queue` driver it
@@ -113,8 +118,8 @@ full list. The ones that change behaviour:
 | `MUSICSEER_LIDARR_ROOT_FOLDER` | `/music` | Must exist in Lidarr; falls back to Lidarr's first root folder. |
 | `MUSICSEER_LIDARR_QUALITY_PROFILE_ID` / `..._METADATA_PROFILE_ID` | auto | Left blank, music-seer picks Lidarr's defaults. |
 | `MUSICSEER_LIDARR_ARTIST_MONITOR` | `all` | `all` \| `future` \| `missing` \| `none`. |
-| `MUSICSEER_JELLYFIN_URL` | — | Jellyfin base URL. Leave blank to fall back to Lidarr-only availability. |
-| `MUSICSEER_JELLYFIN_API_KEY` | — | Jellyfin API key (Dashboard → API Keys). |
+| `MUSICSEER_JELLYFIN_URL` | — | Jellyfin base URL. Also settable in the app. |
+| `MUSICSEER_JELLYFIN_API_KEY` | — | Jellyfin API key (Dashboard → API Keys). Prefer the Settings page. |
 | `MUSICSEER_JELLYFIN_USER_ID` | auto | Only set this if item searches come back empty on your Jellyfin version. |
 | `MUSICSEER_FALLBACK_AFTER_MINUTES` | `120` | How long to wait on Lidarr. `0` = never fall back automatically. |
 | `MUSICSEER_POLL_INTERVAL_MINUTES` | `5` | Reconciler interval. |
@@ -132,6 +137,22 @@ full list. The ones that change behaviour:
 hatch: on some dual-stack networks Node's Happy Eyeballs fails fast on
 unreachable IPv6 addresses instead of falling back to IPv4, which breaks
 outbound HTTP. `auto` disables the autoselection on Windows only.
+
+### Settings in the app
+
+Jellyfin and Lidarr credentials can be set from the **Settings** page instead of
+`.env`. That matters when the app runs on a box you only reach through a
+browser: paste the API key, hit *Test connection*, and it is used immediately —
+no restart, and no shell access required.
+
+Precedence is **saved value → environment**. Clearing a saved value reveals the
+`.env` one again. Stored keys live in the SQLite database in plain text and are
+never sent back to the browser; the API reports only that a key is set, where it
+came from, and its last four characters.
+
+This app has no login of its own. Anyone who can reach it can read your
+requests and change these settings, so keep it on your LAN or behind a reverse
+proxy that authenticates.
 
 ### The yt-dlp command
 
@@ -186,7 +207,10 @@ All routes are JSON and unauthenticated.
 | `DELETE` | `/api/requests/:id` | Cancel. |
 | `POST` | `/api/requests/:id/fallback` | Force yt-dlp, optionally `{source}`. |
 | `POST` | `/api/requests/:id/import` | Ask Lidarr to rescan completed downloads. |
-| `GET` | `/api/health` | Lidarr/scheduler/yt-dlp status. Add `?tick=1` to reconcile now. |
+| `GET` | `/api/health` | Lidarr/Jellyfin/scheduler/yt-dlp status. Add `?tick=1` to reconcile now. |
+| `GET` | `/api/settings` | Credentials in use — masked, plus whether each came from the app or `.env`. |
+| `PUT` | `/api/settings` | Save `{jellyfinUrl, jellyfinApiKey, jellyfinUserId, lidarrUrl, lidarrApiKey}`, or `{clear: ["jellyfin"]}`. |
+| `POST` | `/api/settings/test` | Try a URL/key without saving it. |
 | `GET` | `/api/cover?mbid=&size=` | Cached Cover Art Archive proxy. |
 
 Request statuses: `pending`, `submitted`, `processing`, `fallback_queued`,

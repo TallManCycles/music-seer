@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { config, jellyfinConfigured, lidarrConfigured } from "@/lib/config";
+import { config } from "@/lib/config";
+import { jellyfinReady, lidarrReady } from "@/lib/settings";
 import { systemStatus } from "@/lib/lidarr";
 import { systemStatus as jellyfinStatus } from "@/lib/jellyfin";
 import { schedulerInfo, tick } from "@/lib/scheduler";
@@ -18,7 +19,7 @@ export async function GET(req: Request) {
   const sample = commandFor(defaultSourceFor("track", "Daft Punk", "Get Lucky"));
   return NextResponse.json({
     scheduler: schedulerInfo(),
-    lidarr: { configured: lidarrConfigured(), ...lidarr },
+    lidarr: { configured: lidarrReady(), ...lidarr },
     jellyfin,
     ytdlp: {
       driver: cfg.ytdlp.driver,

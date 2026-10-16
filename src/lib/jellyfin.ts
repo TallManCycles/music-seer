@@ -1,4 +1,4 @@
-import { config, jellyfinConfigured } from "./config";
+import { jellyfinCredentials, jellyfinReady } from "./settings";
 import type { MediaType } from "./types";
 
 /**
@@ -47,9 +47,9 @@ async function request<T>(
   path: string,
   init?: { query?: Record<string, string | number | boolean | undefined>; body?: unknown }
 ): Promise<T> {
-  const cfg = config().jellyfin;
-  if (!jellyfinConfigured()) {
-    throw new JellyfinError("Jellyfin is not configured (set MUSICSEER_JELLYFIN_URL and API key)");
+  const cfg = jellyfinCredentials();
+  if (!jellyfinReady()) {
+    throw new JellyfinError("Jellyfin is not configured (set the URL and API key on the Settings page)");
   }
 
   const url = new URL(`${cfg.url}/${path.replace(/^\/+/, "")}`);
@@ -132,7 +132,7 @@ export async function searchItems(opts: {
   term?: string;
   limit?: number;
 }): Promise<JellyfinItem[]> {
-  const cfg = config().jellyfin;
+  const cfg = jellyfinCredentials();
   const base = cfg.userId ? `Users/${encodeURIComponent(cfg.userId)}/Items` : "Items";
   const result = await request<{ Items?: JellyfinItem[] }>("GET", base, {
     query: {
@@ -204,7 +204,7 @@ export async function systemStatus(): Promise<{
   serverName?: string;
   error?: string;
 }> {
-  if (!jellyfinConfigured()) return { configured: false, reachable: false, error: "not configured" };
+  if (!jellyfinReady()) return { configured: false, reachable: false, error: "not configured" };
   try {
     // /System/Info/Public needs no key, so this also distinguishes "down" from
     // "bad API key".

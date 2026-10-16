@@ -8,15 +8,23 @@ Lidarr cannot deliver (no release, nothing grabbed, a download stuck for too
 long), the request is handed to **yt-dlp** automatically — or on demand, with a
 URL you supply (a YouTube Music playlist, an album, a single video).
 
+**Jellyfin is the library of record.** Whether something is "available" is
+answered by your Jellyfin library, not by Lidarr's bookkeeping: a request that
+Jellyfin already has is marked available straight away and never sent to Lidarr
+at all, and a yt-dlp download only becomes available once Jellyfin can see it.
+
 ```
-Discover ──▶ Request ──▶ Lidarr (artist + album, monitored, searched)
-                             │
-                             │  not available within the window
-                             ▼
+Discover ──▶ Request ──▶ already in Jellyfin? ──yes──▶ Available
+                              │ no
+                              ▼
+                        Lidarr (artist + album, monitored, searched)
+                              │
+                              │  not available within the window
+                              ▼
                         yt-dlp job (audio in your inbox)
-                             │
-                             ▼
-                   Import pending ──▶ Available
+                              │
+                              ▼
+                   Import pending ──▶ (Jellyfin scan) ──▶ Available
 ```
 
 It is deliberately single-user and auth-free: put it behind your reverse proxy
@@ -29,11 +37,12 @@ or on your LAN, next to the rest of the *arr stack.
 | | |
 |---|---|
 | **Discover** | Typeahead search over MusicBrainz for albums, artists and tracks, with Cover Art Archive artwork. |
-| **Request** | Adds the artist and album to Lidarr, monitored, and kicks off a search. Vertical slices: albums and artists are first-class; a *track* request is funnelled through its album and then checked file-by-file. |
+| **Check** | Asks Jellyfin whether the library already has it. If it does, the request is done — Lidarr is never troubled. |
+| **Request** | Otherwise adds the artist and album to Lidarr, monitored, and kicks off a search. Vertical slices: albums and artists are first-class; a *track* request is funnelled through its album and then checked file-by-file. |
 | **Wait** | A reconciler polls Lidarr for "% of tracks on disk" and queue state, so the UI shows real progress. |
 | **Fall back** | After `MUSICSEER_FALLBACK_AFTER_MINUTES` (or immediately, if Lidarr has no release at all) the job goes to yt-dlp. |
 | **Override** | Any request can be pushed to yt-dlp by hand, with an editable source URL. |
-| **Import** | Files land in an *inbox*, not the library. Optionally ask Lidarr to rescan so it can import them. |
+| **Import** | Files land in an *inbox*, not the library. A library scan in Jellyfin (the *Ask Lidarr to import* button also refreshes Jellyfin) is what turns them into `available`. |
 
 ## Why "Lidarr has no release" jumps the queue
 
@@ -104,9 +113,12 @@ full list. The ones that change behaviour:
 | `MUSICSEER_LIDARR_ROOT_FOLDER` | `/music` | Must exist in Lidarr; falls back to Lidarr's first root folder. |
 | `MUSICSEER_LIDARR_QUALITY_PROFILE_ID` / `..._METADATA_PROFILE_ID` | auto | Left blank, music-seer picks Lidarr's defaults. |
 | `MUSICSEER_LIDARR_ARTIST_MONITOR` | `all` | `all` \| `future` \| `missing` \| `none`. |
+| `MUSICSEER_JELLYFIN_URL` | — | Jellyfin base URL. Leave blank to fall back to Lidarr-only availability. |
+| `MUSICSEER_JELLYFIN_API_KEY` | — | Jellyfin API key (Dashboard → API Keys). |
+| `MUSICSEER_JELLYFIN_USER_ID` | auto | Only set this if item searches come back empty on your Jellyfin version. |
 | `MUSICSEER_FALLBACK_AFTER_MINUTES` | `120` | How long to wait on Lidarr. `0` = never fall back automatically. |
 | `MUSICSEER_POLL_INTERVAL_MINUTES` | `5` | Reconciler interval. |
-| `MUSICSEER_LIDARR_COMPLETE_THRESHOLD` | `1` | Fraction of tracks that counts as "available". `0.95` tolerates a missing bonus track. |
+| `MUSICSEER_LIDARR_COMPLETE_THRESHOLD` | `1` | Used only when Jellyfin is not configured: fraction of tracks Lidarr must have on disk to count as "available". `0.95` tolerates a missing bonus track. |
 | `MUSICSEER_YTDLP_DRIVER` | `local` | `queue` \| `local` \| `none`. `queue` (the compose default) uses the worker container; `local` runs a `yt-dlp` binary on the app's own PATH. |
 | `MUSICSEER_YTDLP_IMAGE` | `jauderho/yt-dlp:latest` | Worker image (compose only). |
 | `MUSICSEER_SPOOL_PATH` | `./spool` | Directory the app and the worker share for jobs. |
@@ -204,10 +216,12 @@ MusicBrainz IDs, so only the search check depends on the network.
 ```
 src/lib/config.ts        env → typed config
 src/lib/musicbrainz.ts   rate-limited (1 req/s) MusicBrainz + Cover Art client
+src/lib/jellyfin.ts      the library of record: is it already in Jellyfin?
 src/lib/lidarr.ts        Lidarr API: exact-ID lookups, adds, queue, availability
 src/lib/db.ts            SQLite (better-sqlite3) storage for requests + events
 src/lib/requests.ts      the lifecycle: submit → reconcile → fall back
-src/lib/ytdlp.ts         command builder, serialized job queue, output parsing
+src/lib/ytdlp.ts         command builder, source validation, output parsing
+src/lib/spool.ts         the job handoff between the app and the yt-dlp worker
 src/lib/scheduler.ts     periodic reconciler with restart recovery
 src/instrumentation.ts   starts the scheduler with the server
 src/app/api/*            HTTP surface
@@ -222,7 +236,13 @@ src/components/*         UI
   For now, a request with a playlist URL works.
 - **Track requests are approximate.** Lidarr only models artists and albums, so
   a track request monitors the whole album and then looks for that one file.
-- **Files are never moved for you.** The inbox → library step is Lidarr's job
-  (or yours); music-seer only reports what it downloaded.
+- **Files are never moved for you.** The inbox → library step is Jellyfin's job
+  (or yours); music-seer reports what it downloaded and confirms the import once
+  Jellyfin can see the file.
+- **Jellyfin matching is by name.** Artist/album/track names are normalised
+  (case, accents, bracketed qualifiers) and compared exactly, with the artist
+  checked too when Jellyfin reports one. A differently-titled pressing will read
+  as "not in Jellyfin" rather than being guessed at; the cost of a false
+  "available" is that the request is never downloaded.
 - **One yt-dlp job at a time.** Serialized on purpose, to be kind to YouTube and
   to your disk.

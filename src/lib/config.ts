@@ -21,6 +21,17 @@ export interface LidarrConfig {
   searchOnAdd: boolean;
 }
 
+/**
+ * Jellyfin is where the music actually lives, so it — not Lidarr — decides
+ * whether something is available. Lidarr only decides how to acquire it.
+ */
+export interface JellyfinConfig {
+  url: string;
+  apiKey: string;
+  /** Some Jellyfin endpoints are user-scoped; set this if yours needs it. */
+  userId?: string;
+}
+
 export interface YtdlpConfig {
   driver: YtdlpDriver;
   /** Image used by the standalone worker container (compose only). */
@@ -40,6 +51,7 @@ export interface AppConfig {
   dbPath: string;
   userAgent: string;
   lidarr: LidarrConfig;
+  jellyfin: JellyfinConfig;
   ytdlp: YtdlpConfig;
   fallbackAfterMinutes: number;
   pollIntervalMinutes: number;
@@ -89,6 +101,11 @@ export function loadConfig(): AppConfig {
       artistMonitor: (process.env.MUSICSEER_LIDARR_ARTIST_MONITOR ?? "all") as LidarrConfig["artistMonitor"],
       searchOnAdd: bool(process.env.MUSICSEER_LIDARR_SEARCH_ON_ADD, true),
     },
+    jellyfin: {
+      url: (process.env.MUSICSEER_JELLYFIN_URL ?? "").trim().replace(/\/+$/, ""),
+      apiKey: process.env.MUSICSEER_JELLYFIN_API_KEY ?? "",
+      userId: process.env.MUSICSEER_JELLYFIN_USER_ID?.trim() || undefined,
+    },
     ytdlp: {
       driver: ["queue", "local", "none"].includes(driver) ? driver : "local",
       image: process.env.MUSICSEER_YTDLP_IMAGE ?? "jauderho/yt-dlp:latest",
@@ -123,4 +140,8 @@ export function config(): AppConfig {
 
 export function lidarrConfigured(): boolean {
   return Boolean(config().lidarr.url && config().lidarr.apiKey);
+}
+
+export function jellyfinConfigured(): boolean {
+  return Boolean(config().jellyfin.url && config().jellyfin.apiKey);
 }

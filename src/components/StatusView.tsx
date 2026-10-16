@@ -12,6 +12,13 @@ interface Health {
     jobsQueued: number;
   };
   lidarr: { configured: boolean; ok: boolean; version?: string; error?: string };
+  jellyfin: {
+    configured: boolean;
+    reachable: boolean;
+    version?: string;
+    serverName?: string;
+    error?: string;
+  };
   ytdlp: { driver: string; image: string; inbox: string; spool: string; archive: string; sampleCommand: string };
   policy: { fallbackAfterMinutes: number; pollIntervalMinutes: number; completeThreshold: number };
 }
@@ -84,6 +91,25 @@ export default function StatusView() {
             {health.lidarr.version && <Row label="Version" value={health.lidarr.version} />}
             {health.lidarr.error && <Row label="Error" value={health.lidarr.error} bad />}
           </dl>
+        </section>
+
+        <section className="rounded-xl border border-white/5 bg-ink-900/60 p-4">
+          <h2 className="mb-3 flex items-center gap-2 text-sm font-medium uppercase tracking-wide text-white/45">
+            <Dot ok={health.jellyfin.reachable} /> Jellyfin (library of record)
+          </h2>
+          <dl className="space-y-1.5 text-sm">
+            <Row label="Configured" value={health.jellyfin.configured ? "yes" : "no"} />
+            <Row label="Reachable" value={health.jellyfin.reachable ? "yes" : "no"} />
+            {health.jellyfin.serverName && <Row label="Server" value={health.jellyfin.serverName} />}
+            {health.jellyfin.version && <Row label="Version" value={health.jellyfin.version} />}
+            {health.jellyfin.error && <Row label="Error" value={health.jellyfin.error} bad />}
+          </dl>
+          {!health.jellyfin.configured && (
+            <p className="mt-3 text-xs leading-relaxed text-white/40">
+              Without Jellyfin, availability falls back to Lidarr&apos;s own disk statistics and
+              downloads cannot be confirmed as imported.
+            </p>
+          )}
         </section>
 
         <section className="rounded-xl border border-white/5 bg-ink-900/60 p-4">

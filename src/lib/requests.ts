@@ -1,5 +1,6 @@
-import { config, lidarrConfigured } from "./config";
+import { config, jellyfinConfigured, lidarrConfigured } from "./config";
 import * as db from "./db";
+import * as jellyfin from "./jellyfin";
 import * as lidarr from "./lidarr";
 import { enqueueFallback, pollFallback, resolveSource } from "./ytdlp";
 import * as spool from "./spool";
@@ -90,6 +91,20 @@ export async function createRequest(body: CreateRequestBody): Promise<CreateOutc
     db.addEvent(request.id, "info", `Request created: ${type} "${body.title}"`);
   }
 
+  // Nothing to acquire if the library already has it. Jellyfin is the library
+  // of record, so check it before troubling Lidarr at all.
+  const inLibrary = await jellyfinLookup(request);
+  if (inLibrary?.found) {
+    db.updateRequest(request.id, {
+      status: "available",
+      statusDetail: inLibrary.detail,
+      completedAt: new Date().toISOString(),
+      lastError: null,
+    });
+    db.addEvent(request.id, "info", `Already in the library — ${inLibrary.detail}`);
+    return { request: db.getRequest(request.id)!, duplicate: false };
+  }
+
   await submitToLidarr(request.id);
   return { request: db.getRequest(request.id)!, duplicate: false };
 }
@@ -177,64 +192,100 @@ interface Availability {
   error?: string;
 }
 
+/**
+ * Ask Jellyfin whether we already have this. `null` means "cannot say"
+ * (not configured, or the server did not answer) — callers must not read that
+ * as "no". A warning is logged so a broken Jellyfin does not look like an
+ * empty library.
+ */
+async function jellyfinLookup(request: MediaRequest): Promise<jellyfin.LibraryLookup | null> {
+  if (!jellyfinConfigured()) return null;
+  try {
+    return await jellyfin.findInLibrary({
+      type: request.type,
+      title: request.title,
+      artist: request.artist,
+      albumTitle: request.albumTitle,
+    });
+  } catch (err) {
+    db.addEvent(
+      request.id,
+      "warn",
+      `Could not query Jellyfin: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return null;
+  }
+}
+
 async function checkAvailability(request: MediaRequest): Promise<Availability> {
   const threshold = config().completeThreshold * 100;
-  const queue = await lidarr.queueDetails({
-    artistId: request.lidarrArtistId,
-    albumId: request.lidarrAlbumId,
-  });
-  const active = queue.filter((q) =>
-    ["downloading", "importPending", "importing"].includes(q.trackedDownloadState ?? "")
-  );
-  const failed = queue.filter((q) =>
-    ["importFailed", "failedPending", "importBlocked"].includes(q.trackedDownloadState ?? "")
-  );
 
-  if (request.type === "artist") {
-    if (!request.lidarrArtistId) return { available: false, processing: false, detail: "no artist id" };
-    const artist = await lidarr.getArtist(request.lidarrArtistId);
-    const pct = artist.statistics?.percentOfTracks ?? 0;
-    const fileCount = artist.statistics?.trackFileCount ?? 0;
-    return {
-      available: fileCount > 0 && pct >= threshold,
-      processing: active.length > 0,
-      detail: `${Math.round(pct)}% of tracks on disk (${fileCount} files)`,
-      error: failed[0]?.errorMessage,
-    };
-  }
+  // Jellyfin is where the music is, so it is the library of record. Lidarr
+  // still supplies "is it on its way" and the download error text.
+  const inLibrary = await jellyfinLookup(request);
 
-  if (!request.lidarrAlbumId) return { available: false, processing: false, detail: "no album id" };
-  const album = await lidarr.getAlbum(request.lidarrAlbumId);
-  const pct = album.statistics?.percentOfTracks ?? 0;
-  const fileCount = album.statistics?.trackFileCount ?? 0;
+  // What Lidarr's own bookkeeping thinks, kept only as a fallback for when
+  // Jellyfin is not configured or cannot be reached.
+  let lidarrAvailable = false;
+  let lidarrDetail = "Lidarr is not configured";
+  let lidarrError: string | undefined;
+  let processing = false;
 
-  if (request.type === "track") {
-    const tracks = await lidarr.getTracksForAlbum(request.lidarrAlbumId);
-    const want = normalizeTitle(request.title);
-    const match = tracks.find((t) => normalizeTitle(t.title) === want);
-    if (match) {
-      return {
-        available: match.hasFile,
-        processing: active.length > 0,
-        detail: match.hasFile ? `track file present` : `track missing (album ${Math.round(pct)}%)`,
-        error: failed[0]?.errorMessage,
-      };
+  if (lidarrConfigured()) {
+    const queue = await lidarr.queueDetails({
+      artistId: request.lidarrArtistId,
+      albumId: request.lidarrAlbumId,
+    });
+    const active = queue.filter((q) =>
+      ["downloading", "importPending", "importing"].includes(q.trackedDownloadState ?? "")
+    );
+    const failed = queue.filter((q) =>
+      ["importFailed", "failedPending", "importBlocked"].includes(q.trackedDownloadState ?? "")
+    );
+    processing = active.length > 0;
+    lidarrError = failed[0]?.errorMessage;
+
+    if (request.type === "artist") {
+      if (!request.lidarrArtistId) {
+        lidarrDetail = "no artist id";
+      } else {
+        const artist = await lidarr.getArtist(request.lidarrArtistId);
+        const pct = artist.statistics?.percentOfTracks ?? 0;
+        const fileCount = artist.statistics?.trackFileCount ?? 0;
+        lidarrAvailable = fileCount > 0 && pct >= threshold;
+        lidarrDetail = `${Math.round(pct)}% of tracks on disk (${fileCount} files)`;
+      }
+    } else if (!request.lidarrAlbumId) {
+      lidarrDetail = "no album id";
+    } else {
+      const album = await lidarr.getAlbum(request.lidarrAlbumId);
+      const pct = album.statistics?.percentOfTracks ?? 0;
+      const fileCount = album.statistics?.trackFileCount ?? 0;
+      lidarrAvailable = fileCount > 0 && pct >= threshold;
+      lidarrDetail = `${Math.round(pct)}% of tracks on disk (${fileCount} files)`;
+
+      if (request.type === "track") {
+        const tracks = await lidarr.getTracksForAlbum(request.lidarrAlbumId);
+        const want = normalizeTitle(request.title);
+        const match = tracks.find((t) => normalizeTitle(t.title) === want);
+        if (match) {
+          lidarrAvailable = match.hasFile;
+          lidarrDetail = match.hasFile ? "track file present" : `track missing (album ${Math.round(pct)}%)`;
+        } else {
+          lidarrDetail = `track not matched; album ${Math.round(pct)}% complete`;
+        }
+      }
     }
-    // Could not match the title exactly; fall back to album completeness.
-    return {
-      available: fileCount > 0 && pct >= threshold,
-      processing: active.length > 0,
-      detail: `track not matched; album ${Math.round(pct)}% complete`,
-      error: failed[0]?.errorMessage,
-    };
   }
 
-  return {
-    available: fileCount > 0 && pct >= threshold,
-    processing: active.length > 0,
-    detail: `${Math.round(pct)}% of tracks on disk (${fileCount} files)`,
-    error: failed[0]?.errorMessage,
-  };
+  const available = inLibrary ? inLibrary.found : lidarrAvailable;
+  const detail = inLibrary
+    ? inLibrary.found
+      ? inLibrary.detail
+      : `${lidarrDetail}; not in Jellyfin yet`
+    : lidarrDetail;
+
+  return { available, processing, detail, error: lidarrError };
 }
 
 function normalizeTitle(s: string): string {
@@ -252,6 +303,7 @@ export async function reconcile(request: MediaRequest): Promise<void> {
   if (request.source === "ytdlp") {
     // A yt-dlp job is owned by the queue, not by Lidarr.
     if (request.status === "downloading") pollFallback(request);
+    else if (request.status === "import_pending") await recheckImport(request);
     else if (request.status === "fallback_queued" && !spool.hasJob(request.id)) {
       // The job was recorded but never actually queued (e.g. the process died
       // in between). Re-queue it rather than leaving the request stuck.
@@ -288,7 +340,7 @@ export async function reconcile(request: MediaRequest): Promise<void> {
       statusDetail: availability.detail,
       completedAt: new Date().toISOString(),
     });
-    db.addEvent(request.id, "info", `Available via Lidarr — ${availability.detail}`);
+    db.addEvent(request.id, "info", `Available — ${availability.detail}`);
     return;
   }
 
@@ -344,23 +396,79 @@ export async function startFallback(requestId: number, reason: string): Promise<
 }
 
 /**
- * Ask Lidarr to rescan its completed-download folders. Only useful when the
- * inbox is somewhere Lidarr already watches (e.g. a download client's output
- * folder); otherwise importing stays a manual step.
+ * A yt-dlp download has landed in the inbox. It is only really available once
+ * Jellyfin can see it, which is what closes the `import_pending` state — this
+ * used to be a dead end that never became `available`.
+ */
+export async function recheckImport(request: MediaRequest): Promise<void> {
+  const inLibrary = await jellyfinLookup(request);
+
+  if (inLibrary?.found) {
+    db.updateRequest(request.id, {
+      status: "available",
+      statusDetail: inLibrary.detail,
+      completedAt: new Date().toISOString(),
+      lastError: null,
+    });
+    db.addEvent(request.id, "info", `Imported — ${inLibrary.detail}`);
+    return;
+  }
+
+  if (inLibrary === null) {
+    // Jellyfin is not configured or is unreachable, so there is nothing to
+    // confirm the import against. Say so rather than guessing.
+    const detail = jellyfinConfigured()
+      ? "Downloaded to the inbox; Jellyfin could not be reached to confirm the import"
+      : "Downloaded to the inbox; set MUSICSEER_JELLYFIN_URL to confirm imports automatically";
+    if (request.statusDetail !== detail) db.updateRequest(request.id, { statusDetail: detail });
+    return;
+  }
+
+  const detail = "In the inbox — waiting for Jellyfin to scan it in";
+  if (request.statusDetail !== detail) {
+    db.updateRequest(request.id, { statusDetail: detail });
+    db.addEvent(request.id, "info", "Waiting for Jellyfin to pick up the downloaded files");
+  }
+}
+
+/**
+ * Nudge the library to pick up completed downloads. Jellyfin is the library of
+ * record, so refreshing it is the step that actually matters; the Lidarr scan
+ * is kept for setups where the inbox is a folder Lidarr watches itself.
  */
 export async function requestImportScan(requestId: number): Promise<MediaRequest | null> {
   const request = db.getRequest(requestId);
   if (!request) return null;
+
+  if (jellyfinConfigured()) {
+    try {
+      await jellyfin.refreshLibrary();
+      db.addEvent(requestId, "info", "Asked Jellyfin to rescan its libraries");
+      db.updateRequest(requestId, { statusDetail: "Library rescan requested in Jellyfin" });
+    } catch (err) {
+      db.addEvent(
+        requestId,
+        "error",
+        `Jellyfin library refresh failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+
   if (!lidarrConfigured()) {
-    db.addEvent(requestId, "warn", "Cannot trigger an import scan: Lidarr is not configured");
+    if (!jellyfinConfigured()) {
+      db.addEvent(
+        requestId,
+        "warn",
+        "Cannot trigger an import scan: neither Jellyfin nor Lidarr is configured"
+      );
+    }
     return db.getRequest(requestId);
   }
+
   try {
     await lidarr.triggerImportScan();
     db.addEvent(requestId, "info", "Asked Lidarr to scan for completed downloads");
-    db.updateRequest(requestId, {
-      statusDetail: "Import scan requested in Lidarr",
-    });
+    db.updateRequest(requestId, { statusDetail: "Import scan requested in Lidarr" });
   } catch (err) {
     db.addEvent(
       requestId,

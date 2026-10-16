@@ -30,9 +30,16 @@ export interface JellyfinItem {
   Artists?: string[];
   Album?: string;
   ProductionYear?: number;
+  /** Jellyfin's MusicBrainz plugin puts MBIDs here: exact IDs, no guessing. */
+  ProviderIds?: Record<string, string>;
+  ImageTags?: Record<string, string>;
+  DateCreated?: string;
 }
 
 export type MusicItemType = "MusicArtist" | "MusicAlbum" | "Audio";
+
+/** Everything the app needs to display and match an item. */
+const ITEM_FIELDS = "AlbumArtist,Artists,Album,ProductionYear,ProviderIds,ImageTags,DateCreated";
 
 const ITEM_TYPES: Record<MediaType, MusicItemType> = {
   artist: "MusicArtist",
@@ -139,7 +146,7 @@ export async function searchItems(opts: {
       Recursive: true,
       IncludeItemTypes: opts.types.join(","),
       SearchTerm: opts.term,
-      Fields: "AlbumArtist,Artists,Album,ProductionYear",
+      Fields: ITEM_FIELDS,
       Limit: opts.limit ?? 25,
       EnableTotalRecordCount: false,
     },
@@ -195,6 +202,80 @@ export async function findInLibrary(request: {
   }
 
   return { found: false, detail: "not in Jellyfin" };
+}
+
+/**
+ * The music that is actually in the library, newest-sorted by name. This is
+ * what the browse page shows, and what the suggestion engine compares against.
+ */
+export async function listAlbums(opts: { limit?: number; offset?: number } = {}): Promise<JellyfinItem[]> {
+  const cfg = jellyfinCredentials();
+  const base = cfg.userId ? `Users/${encodeURIComponent(cfg.userId)}/Items` : "Items";
+  const result = await request<{ Items?: JellyfinItem[] }>("GET", base, {
+    query: {
+      Recursive: true,
+      IncludeItemTypes: "MusicAlbum",
+      Fields: ITEM_FIELDS,
+      SortBy: "SortName",
+      SortOrder: "Ascending",
+      Limit: opts.limit ?? 500,
+      StartIndex: opts.offset ?? 0,
+      EnableTotalRecordCount: true,
+    },
+  });
+  return result?.Items ?? [];
+}
+
+export async function listArtists(opts: { limit?: number } = {}): Promise<JellyfinItem[]> {
+  const cfg = jellyfinCredentials();
+  const base = cfg.userId ? `Users/${encodeURIComponent(cfg.userId)}/Items` : "Items";
+  const result = await request<{ Items?: JellyfinItem[] }>("GET", base, {
+    query: {
+      Recursive: true,
+      IncludeItemTypes: "MusicArtist",
+      Fields: ITEM_FIELDS,
+      SortBy: "SortName",
+      Limit: opts.limit ?? 500,
+      EnableTotalRecordCount: true,
+    },
+  });
+  return result?.Items ?? [];
+}
+
+/** The MusicBrainz artist id Jellyfin has for an item, if its plugin supplies one. */
+export function musicBrainzArtistId(item: JellyfinItem): string | undefined {
+  const id = item.ProviderIds?.MusicBrainzArtist;
+  return id && /^[0-9a-f-]{36}$/i.test(id) ? id : undefined;
+}
+
+/**
+ * Where Jellyfin serves an item's cover. The api key is added by the proxy
+ * route, never by the browser.
+ */
+export function imageEndpoint(itemId: string, size = 300): string {
+  const cfg = jellyfinCredentials();
+  const params = new URLSearchParams({
+    maxHeight: String(size),
+    quality: "90",
+  });
+  return `${cfg.url}/Items/${encodeURIComponent(itemId)}/Images/Primary?${params.toString()}`;
+}
+
+export async function imageResponse(itemId: string, size: number): Promise<Response> {
+  const cfg = jellyfinCredentials();
+  if (!jellyfinReady()) return new Response("jellyfin not configured", { status: 400 });
+  const res = await fetch(imageEndpoint(itemId, size), {
+    headers: { "X-Emby-Token": cfg.apiKey, Accept: "image/*" },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) return new Response("no image", { status: res.status });
+  const body = await res.arrayBuffer();
+  return new Response(body, {
+    headers: {
+      "Content-Type": res.headers.get("content-type") ?? "image/jpeg",
+      "Cache-Control": "public, max-age=86400, immutable",
+    },
+  });
 }
 
 export async function systemStatus(): Promise<{

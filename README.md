@@ -36,9 +36,10 @@ or on your LAN, next to the rest of the *arr stack.
 
 | | |
 |---|---|
-| **Discover** | Typeahead search over MusicBrainz for albums, artists and tracks, with Cover Art Archive artwork. |
+| **Discover** | Browse your library as a cover-art grid, search MusicBrainz for anything else, and get suggestions drawn from what you already own. |
 | **Check** | Asks Jellyfin whether the library already has it. If it does, the request is done — Lidarr is never troubled. |
 | **Request** | Otherwise adds the artist and album to Lidarr, monitored, and kicks off a search. Vertical slices: albums and artists are first-class; a *track* request is funnelled through its album and then checked file-by-file. |
+| **Suggest** | Takes the artists you own the most of, asks MusicBrainz for their discography, and offers the albums Jellyfin cannot see ("you have 4 albums by AC/DC, here is the fifth"). |
 | **Wait** | A reconciler polls Lidarr for "% of tracks on disk" and queue state, so the UI shows real progress. |
 | **Fall back** | After `MUSICSEER_FALLBACK_AFTER_MINUTES` (or immediately, if Lidarr has no release at all) the job goes to yt-dlp. |
 | **Override** | Any request can be pushed to yt-dlp by hand, with an editable source URL. |
@@ -200,6 +201,9 @@ All routes are JSON and unauthenticated.
 | Method | Route | Purpose |
 |---|---|---|
 | `GET` | `/api/search?q=&type=artist\|album\|track` | MusicBrainz search, annotated with existing-request state. |
+| `GET` | `/api/library?limit=` | Albums in the Jellyfin library, with cover URLs for the browse UI. |
+| `GET` | `/api/library/cover?id=&size=` | Cover art proxy — the API key never reaches the browser. |
+| `GET` | `/api/discover?limit=` | Suggested albums missing from the library, with the reason for each. |
 | `GET` | `/api/requests` | All requests. |
 | `POST` | `/api/requests` | Create (or re-request) one. |
 | `GET` | `/api/requests/:id` | One request plus its event log. |
@@ -241,6 +245,7 @@ MusicBrainz IDs, so only the search check depends on the network.
 src/lib/config.ts        env → typed config
 src/lib/musicbrainz.ts   rate-limited (1 req/s) MusicBrainz + Cover Art client
 src/lib/jellyfin.ts      the library of record: is it already in Jellyfin?
+src/lib/discover.ts      suggestions: what is missing from artists you own
 src/lib/lidarr.ts        Lidarr API: exact-ID lookups, adds, queue, availability
 src/lib/db.ts            SQLite (better-sqlite3) storage for requests + events
 src/lib/requests.ts      the lifecycle: submit → reconcile → fall back
@@ -268,5 +273,10 @@ src/components/*         UI
   checked too when Jellyfin reports one. A differently-titled pressing will read
   as "not in Jellyfin" rather than being guessed at; the cost of a false
   "available" is that the request is never downloaded.
+- **Suggestions need MusicBrainz ids.** They come from the MusicBrainz plugin in
+  Jellyfin (`ProviderIds`). Artists without one are skipped rather than guessed
+  at, because a wrong match suggests the wrong discography. Suggestions cover
+  the four artists you own most of, and are cached for 30 minutes — MusicBrainz
+  allows about one request per second.
 - **One yt-dlp job at a time.** Serialized on purpose, to be kind to YouTube and
   to your disk.

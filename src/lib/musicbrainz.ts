@@ -28,8 +28,13 @@ async function acquire(): Promise<void> {
 
 // --- HTTP ------------------------------------------------------------------
 
-const LUCENE_SPECIAL = /([+\-!(){}[\]^"~*?:\\/]|&&|\|\|)/g;
+const LUCENE_SPECIAL = /((?:[+\-!(){}[\]^"~*?:\\/])|&&|\|\|)/g;
 
+/**
+ * Escape Lucene syntax. Note the outer group: without it the `&&`/`||`
+ * branches have no capture group, so the replacement would silently become a
+ * lone backslash and mangle the query.
+ */
 function escapeLucene(q: string): string {
   return q.replace(LUCENE_SPECIAL, "\\$1");
 }
@@ -134,6 +139,35 @@ function yearOf(date: string | undefined): string | undefined {
 export function coverArtUrl(releaseGroupMbid: string | undefined, size = 250): string | undefined {
   if (!releaseGroupMbid) return undefined;
   return `${COVER_ART}/release-group/${releaseGroupMbid}/front-${size}`;
+}
+
+/**
+ * An artist's studio albums, by MBID (the browse endpoint, not search — so the
+ * results really are that artist's albums). Used to suggest what is missing
+ * from a library that already has the artist.
+ */
+export async function releaseGroupsForArtist(artistMbid: string, limit = 25): Promise<SearchResult[]> {
+  if (!artistMbid) return [];
+  const data = await mbFetch<{ "release-groups": MBReleaseGroup[] }>("release-group", {
+    artist: artistMbid,
+    type: "album",
+    limit: String(limit),
+    fmt: "json",
+  });
+
+  return (data["release-groups"] ?? [])
+    .map((rg) => ({
+      type: "album" as const,
+      mbid: rg.id,
+      releaseGroupMbid: rg.id,
+      title: rg.title,
+      artist: creditName(rg["artist-credit"]),
+      artistMbid: firstArtistMbid(rg["artist-credit"]) ?? artistMbid,
+      year: yearOf(rg["first-release-date"]),
+      coverUrl: coverArtUrl(rg.id),
+      subtitle: [rg["primary-type"], ...(rg["secondary-types"] ?? [])].filter(Boolean).join(" · "),
+    }))
+    .sort((a, b) => (b.year ?? "").localeCompare(a.year ?? ""));
 }
 
 export async function search(query: string, type: MediaType): Promise<SearchResult[]> {

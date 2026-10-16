@@ -1,7 +1,8 @@
 import { config, lidarrConfigured } from "./config";
 import * as db from "./db";
 import * as lidarr from "./lidarr";
-import { enqueueFallback, defaultSourceFor } from "./ytdlp";
+import { enqueueFallback, pollFallback, resolveSource } from "./ytdlp";
+import * as spool from "./spool";
 import { releaseGroupForRecording } from "./musicbrainz";
 import type { CreateRequestBody, MediaRequest, MediaType, RequestStatus } from "./types";
 
@@ -247,10 +248,24 @@ function normalizeTitle(s: string): string {
 /** One pass over a single request: refresh status, or trigger the fallback. */
 export async function reconcile(request: MediaRequest): Promise<void> {
   if (isTerminal(request.status)) return;
-  if (request.source === "ytdlp") return; // handled by the download queue
+
+  if (request.source === "ytdlp") {
+    // A yt-dlp job is owned by the queue, not by Lidarr.
+    if (request.status === "downloading") pollFallback(request);
+    else if (request.status === "fallback_queued" && !spool.hasJob(request.id)) {
+      // The job was recorded but never actually queued (e.g. the process died
+      // in between). Re-queue it rather than leaving the request stuck.
+      enqueueFallback(request);
+    }
+    return;
+  }
 
   const elapsedMs = Date.now() - new Date(request.submittedAt ?? request.requestedAt).getTime();
   const windowMs = request.fallbackAfterMinutes * 60_000;
+  // fallbackAfterMinutes === 0 means "never fall back automatically"; the
+  // request has to be pushed to yt-dlp by hand. Do not treat 0 as "now".
+  const autoFallbackDue =
+    request.autoFallback && request.fallbackAfterMinutes > 0 && elapsedMs >= windowMs;
 
   let availability: Availability;
   try {
@@ -261,7 +276,7 @@ export async function reconcile(request: MediaRequest): Promise<void> {
       "warn",
       `Could not read Lidarr status: ${err instanceof Error ? err.message : String(err)}`
     );
-    if (request.autoFallback && elapsedMs >= windowMs) {
+    if (autoFallbackDue) {
       await startFallback(request.id, "Lidarr status unavailable");
     }
     return;
@@ -286,7 +301,7 @@ export async function reconcile(request: MediaRequest): Promise<void> {
       : availability.detail,
   });
 
-  if (request.autoFallback && elapsedMs >= windowMs) {
+  if (autoFallbackDue) {
     await startFallback(
       request.id,
       availability.error
@@ -303,12 +318,24 @@ export async function startFallback(requestId: number, reason: string): Promise<
   if (!request || isTerminal(request.status)) return;
   if (request.source === "ytdlp" && request.status === "downloading") return;
 
-  const source = request.ytdlpSource ?? defaultSourceFor(request.type, request.artist, request.title);
+  // Reject a bad source before the request is marked as handed off, so an
+  // unusable URL fails loudly instead of queueing a job that cannot run.
+  const check = resolveSource(request);
+  if (!check.ok) {
+    db.updateRequest(requestId, {
+      status: "failed",
+      statusDetail: "Invalid yt-dlp source",
+      lastError: check.reason,
+    });
+    db.addEvent(requestId, "error", `Refused to queue yt-dlp: ${check.reason}`);
+    return;
+  }
+
   db.updateRequest(requestId, {
     source: "ytdlp",
     status: "fallback_queued",
     statusDetail: `Queued for yt-dlp — ${reason}`,
-    ytdlpSource: source,
+    ytdlpSource: check.source,
     fallbackAt: new Date().toISOString(),
   });
   db.addEvent(requestId, "info", `Handing off to yt-dlp: ${reason}`);
@@ -344,7 +371,8 @@ export async function requestImportScan(requestId: number): Promise<MediaRequest
   return db.getRequest(requestId);
 }
 
-export async function forceFallback(requestId: number, source?: string): Promise<MediaRequest | null> {  const request = db.getRequest(requestId);
+export async function forceFallback(requestId: number, source?: string): Promise<MediaRequest | null> {
+  const request = db.getRequest(requestId);
   if (!request) return null;
   if (isTerminal(request.status)) {
     // Allow re-running an available/failed request through yt-dlp.
@@ -358,6 +386,10 @@ export async function forceFallback(requestId: number, source?: string): Promise
 export function cancelRequest(requestId: number): MediaRequest | null {
   const request = db.getRequest(requestId);
   if (!request) return null;
+  // Drop any queued job so the worker does not keep filling the inbox for a
+  // request that no longer exists. A job already in flight finishes, but its
+  // result is discarded by the queue.
+  spool.clearJob(requestId);
   db.updateRequest(requestId, {
     status: "cancelled",
     statusDetail: "Cancelled by user",

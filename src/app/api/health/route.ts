@@ -21,7 +21,8 @@ export async function GET(req: Request) {
     ytdlp: {
       driver: cfg.ytdlp.driver,
       image: cfg.ytdlp.image,
-      inbox: cfg.ytdlp.inboxHostPath,
+      inbox: cfg.ytdlp.inboxContainerPath,
+      spool: cfg.ytdlp.spoolPath,
       archive: cfg.ytdlp.archive,
       sampleCommand: [sample.cmd, ...sample.args].join(" "),
     },

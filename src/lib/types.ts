@@ -77,6 +77,14 @@ export interface RequestEvent {
   message: string;
 }
 
+/** Result of one yt-dlp job, however it was executed. */
+export interface RunOutcome {
+  ok: boolean;
+  files: string[];
+  error?: string;
+  skipped: boolean;
+}
+
 export interface CreateRequestBody {
   type: MediaType;
   mbid: string;

@@ -12,7 +12,7 @@ interface Health {
     jobsQueued: number;
   };
   lidarr: { configured: boolean; ok: boolean; version?: string; error?: string };
-  ytdlp: { driver: string; image: string; inbox: string; archive: string; sampleCommand: string };
+  ytdlp: { driver: string; image: string; inbox: string; spool: string; archive: string; sampleCommand: string };
   policy: { fallbackAfterMinutes: number; pollIntervalMinutes: number; completeThreshold: number };
 }
 
@@ -92,8 +92,9 @@ export default function StatusView() {
           </h2>
           <dl className="space-y-1.5 text-sm">
             <Row label="Driver" value={health.ytdlp.driver} />
-            <Row label="Image" value={health.ytdlp.image} />
-            <Row label="Inbox (host)" value={health.ytdlp.inbox} />
+            <Row label="Worker image" value={health.ytdlp.image} />
+            <Row label="Inbox (worker)" value={health.ytdlp.inbox} />
+            <Row label="Spool" value={health.ytdlp.spool} />
             <Row label="Archive" value={health.ytdlp.archive} />
           </dl>
           <pre className="mt-3 max-h-40 overflow-auto rounded-lg bg-ink-950 p-3 font-mono text-[11px] leading-relaxed text-white/60">

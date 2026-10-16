@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import * as db from "@/lib/db";
 import { cancelRequest, reconcile, submitToLidarr } from "@/lib/requests";
+import { validateSource } from "@/lib/ytdlp";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,7 +34,11 @@ export async function PATCH(req: Request, ctx: Ctx) {
   }
 
   if (parsed.data.ytdlpSource !== undefined) {
-    db.updateRequest(requestId, { ytdlpSource: parsed.data.ytdlpSource });
+    const check = validateSource(parsed.data.ytdlpSource);
+    if (!check.ok) {
+      return NextResponse.json({ error: "invalid source", reason: check.reason }, { status: 400 });
+    }
+    db.updateRequest(requestId, { ytdlpSource: check.source });
   }
   if (parsed.data.autoFallback !== undefined) {
     db.updateRequest(requestId, { autoFallback: parsed.data.autoFallback });

@@ -1,6 +1,15 @@
 import path from "node:path";
 
-export type YtdlpDriver = "docker" | "local" | "none";
+/**
+ * How a yt-dlp job actually runs.
+ *
+ *   queue  the app writes a job into a shared spool directory; a separate
+ *          yt-dlp worker container picks it up. No Docker socket, and the
+ *          web app never executes anything.
+ *   local  the app shells out to a `yt-dlp` binary on its own PATH.
+ *   none   downloads are queued but never run.
+ */
+export type YtdlpDriver = "queue" | "local" | "none";
 
 export interface LidarrConfig {
   url: string;
@@ -14,7 +23,11 @@ export interface LidarrConfig {
 
 export interface YtdlpConfig {
   driver: YtdlpDriver;
+  /** Image used by the standalone worker container (compose only). */
   image: string;
+  /** Directory shared with the worker where jobs are written. */
+  spoolPath: string;
+  /** Inbox and config as the *worker* sees them (local driver: as the app sees them). */
   inboxHostPath: string;
   configHostPath: string;
   inboxContainerPath: string;
@@ -57,7 +70,7 @@ function jsonArray(value: string | undefined): string[] {
 
 export function loadConfig(): AppConfig {
   const cwd = process.cwd();
-  const driver = (process.env.MUSICSEER_YTDLP_DRIVER ?? "docker").trim() as YtdlpDriver;
+  const driver = (process.env.MUSICSEER_YTDLP_DRIVER ?? "local").trim() as YtdlpDriver;
 
   return {
     dbPath: path.resolve(
@@ -77,8 +90,12 @@ export function loadConfig(): AppConfig {
       searchOnAdd: bool(process.env.MUSICSEER_LIDARR_SEARCH_ON_ADD, true),
     },
     ytdlp: {
-      driver: ["docker", "local", "none"].includes(driver) ? driver : "docker",
+      driver: ["queue", "local", "none"].includes(driver) ? driver : "local",
       image: process.env.MUSICSEER_YTDLP_IMAGE ?? "jauderho/yt-dlp:latest",
+      spoolPath: path.resolve(
+        /* turbopackIgnore: true */ cwd,
+        process.env.MUSICSEER_SPOOL_PATH ?? "./spool"
+      ),
       inboxHostPath: process.env.MUSICSEER_INBOX_HOST_PATH ?? "/mnt/nas/aaron/music-inbox",
       configHostPath: process.env.MUSICSEER_YTDLP_CONFIG_HOST_PATH ?? "/home/aaron/docker/ytdlp",
       inboxContainerPath: process.env.MUSICSEER_INBOX_CONTAINER_PATH ?? "/inbox",

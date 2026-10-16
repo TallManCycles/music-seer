@@ -2,6 +2,8 @@ import { config } from "./config";
 import * as db from "./db";
 import { reconcile, isTerminal } from "./requests";
 import { enqueueFallback, queueDepth } from "./ytdlp";
+import * as spool from "./spool";
+import type { RequestStatus } from "./types";
 
 interface SchedulerState {
   timer: NodeJS.Timeout | null;
@@ -33,8 +35,13 @@ export function schedulerInfo() {
 
 /** Re-arm jobs that were mid-flight when the process last exited. */
 function recover(): void {
-  const stranded = db.listByStatus(["fallback_queued", "downloading"]);
-  for (const request of stranded) {
+  // With the queue driver a job outlives this process: the worker owns it and
+  // the spool file is still there, so only re-queue what was never handed over.
+  const statuses: RequestStatus[] =
+    config().ytdlp.driver === "queue" ? ["fallback_queued"] : ["fallback_queued", "downloading"];
+
+  for (const request of db.listByStatus(statuses)) {
+    if (spool.hasJob(request.id)) continue;
     db.addEvent(request.id, "warn", "Re-queuing job after restart");
     db.updateRequest(request.id, { status: "fallback_queued" });
     enqueueFallback({ ...request, status: "fallback_queued" });
@@ -46,9 +53,9 @@ export async function tick(): Promise<void> {
   if (s.ticking) return;
   s.ticking = true;
   try {
-    const active = db
-      .listRequests()
-      .filter((r) => !isTerminal(r.status) && r.source === "lidarr");
+    // reconcile() decides what each request needs: Lidarr polling for
+    // lidarr-sourced requests, queue polling for yt-dlp ones.
+    const active = db.listRequests().filter((r) => !isTerminal(r.status));
     for (const request of active) {
       const fresh = db.getRequest(request.id);
       if (fresh && !isTerminal(fresh.status)) await reconcile(fresh);

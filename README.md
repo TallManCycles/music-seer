@@ -62,10 +62,14 @@ open http://localhost:8666
 
 Two things worth understanding before you start:
 
-1. **Host paths, not container paths.** music-seer launches yt-dlp by running
-   `docker run …` against the Docker socket, so `MUSICSEER_INBOX_HOST_PATH` and
-   `MUSICSEER_YTDLP_CONFIG_HOST_PATH` must be paths *the Docker daemon* can see
-   — the same ones you already use in your yt-dlp compose service.
+1. **The app never runs yt-dlp itself.** With the default `queue` driver it
+   writes a job file into `./spool`; the `ytdlp-worker` service in
+   `docker-compose.yml` picks it up and runs yt-dlp with the argv the app
+   prepared. That is why music-seer needs no Docker socket and runs as a
+   non-root user — the only thing crossing the boundary is an argv list.
+   `MUSICSEER_INBOX_HOST_PATH` and `MUSICSEER_YTDLP_CONFIG_HOST_PATH` are host
+   paths, because compose uses them to mount the worker's `/inbox` and
+   `/config` — the same directories your existing yt-dlp service uses.
 2. **The inbox is not the library.** Downloads deliberately land in
    `music-inbox` so nothing rewrites your library behind Lidarr's back. Move
    them in with Lidarr's import (the *Ask Lidarr to import* button triggers
@@ -76,12 +80,15 @@ Two things worth understanding before you start:
 ```bash
 npm install
 npm run build
-npm start          # http://localhost:8666
+PORT=8666 npm start   # http://localhost:8666
 ```
 
 `npm start` runs Next's standalone server and pins the database to
 `./data/musicseer.db` (Next's standalone `server.js` changes its working
 directory at boot, so a relative path would otherwise land inside `.next/`).
+It does **not** read `.env` — pass settings in the environment, or use
+`docker compose`, which reads `.env` via `env_file`. The standalone server
+listens on `PORT` (3000 unless you set it).
 
 ---
 
@@ -100,12 +107,14 @@ full list. The ones that change behaviour:
 | `MUSICSEER_FALLBACK_AFTER_MINUTES` | `120` | How long to wait on Lidarr. `0` = never fall back automatically. |
 | `MUSICSEER_POLL_INTERVAL_MINUTES` | `5` | Reconciler interval. |
 | `MUSICSEER_LIDARR_COMPLETE_THRESHOLD` | `1` | Fraction of tracks that counts as "available". `0.95` tolerates a missing bonus track. |
-| `MUSICSEER_YTDLP_DRIVER` | `docker` | `docker` \| `local` \| `none`. |
-| `MUSICSEER_YTDLP_IMAGE` | `jauderho/yt-dlp:latest` | Image used by the `docker` driver. |
+| `MUSICSEER_YTDLP_DRIVER` | `local` | `queue` \| `local` \| `none`. `queue` (the compose default) uses the worker container; `local` runs a `yt-dlp` binary on the app's own PATH. |
+| `MUSICSEER_YTDLP_IMAGE` | `jauderho/yt-dlp:latest` | Worker image (compose only). |
+| `MUSICSEER_SPOOL_PATH` | `./spool` | Directory the app and the worker share for jobs. |
 | `MUSICSEER_INBOX_HOST_PATH` | `/mnt/nas/aaron/music-inbox` | Where downloads land (host path). |
+| `MUSICSEER_INBOX_CONTAINER_PATH` | `/inbox` | Where the worker sees the inbox; this is what ends up in yt-dlp's argv. |
 | `MUSICSEER_YTDLP_CONFIG_HOST_PATH` | `/home/aaron/docker/ytdlp` | Holds the download archive (host path). |
 | `MUSICSEER_YTDLP_ARCHIVE` | `musicseer_archive.txt` | Download-archive filename, so nothing is fetched twice. |
-| `MUSICSEER_YTDLP_EXTRA_ARGS` | `[]` | JSON array of extra yt-dlp flags. |
+| `MUSICSEER_YTDLP_EXTRA_ARGS` | `[]` | JSON array of extra yt-dlp flags. Only these and the app's own flags are trusted; a user's source is never concatenated into the command line. |
 
 `MUSICSEER_NET_FAMILY_AUTOSELECT` (`auto` | `on` | `off`) is a small escape
 hatch: on some dual-stack networks Node's Happy Eyeballs fails fast on
@@ -114,15 +123,12 @@ outbound HTTP. `auto` disables the autoselection on Windows only.
 
 ### The yt-dlp command
 
-music-seer builds the same command you already run, adding a couple of flags so
-it can report back:
+The worker runs exactly the command you already run, plus a couple of flags so
+the app can report back. The app's job file contains this argv, one element per
+line:
 
 ```bash
-docker run --rm \
-  -v "$INBOX_HOST:/inbox" \
-  -v "$CONFIG_HOST:/config" \
-  jauderho/yt-dlp:latest \
-  <source> \
+yt-dlp \
   --download-archive /config/musicseer_archive.txt \
   --ignore-errors --sleep-requests 1 --sleep-interval 3 \
   --extract-audio --audio-format m4a \
@@ -133,17 +139,24 @@ docker run --rm \
   --replace-in-metadata meta_artist ' - Topic$' '' \
   --replace-in-metadata meta_title '\s*[\(\[][^\)\]]*(Official|Lyric|Audio|Video|Visuali[sz]er|Clean|Free Download)[^\)\]]*[\)\]]' '' \
   --output '/inbox/%(meta_artist)s - %(meta_title)s [%(id)s].%(ext)s' \
-  --print after_move:filepath --newline
+  --print after_move:filepath --newline \
+  '<source>'
 ```
 
 `--print after_move:filepath` is what lets music-seer list the files it
 produced; `--no-playlist` is added when the source is a `ytsearch:` query so a
 single-track request fetches a single track.
 
-**The source.** Tracks default to `ytsearch1:<artist> <title>`. Albums default
-to a search too — but a search is a guess. For anything you care about, paste
-the real URL into the request (the source field appears on every request, and
-in the *Get via yt-dlp* flow). A YouTube Music album/playlist URL is exact.
+**The source.** The one field a user controls is validated before it is ever
+queued: it must be an `http(s)` URL or a `ytsearch[N]:` query (1–50 results),
+with no control characters and no leading `-`, and it is passed as the *last*
+argv element so it can never be read as an option. Anything else is rejected
+with a 400 rather than escaped.
+
+Tracks default to `ytsearch1:<artist> <title>`. Albums default to a search too
+— but a search is a guess. For anything you care about, paste the real URL into
+the request (the source field appears on every request, and in the *Get via
+yt-dlp* flow). A YouTube Music album/playlist URL is exact.
 
 ---
 

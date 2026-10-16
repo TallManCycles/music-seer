@@ -1,6 +1,7 @@
 node_modules
 .next
 data
+spool
 .git
 .env
 .env.local

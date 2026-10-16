@@ -18,20 +18,26 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 
-# docker CLI (static binary) so we can launch the yt-dlp image via the socket.
+# For MUSICSEER_YTDLP_DRIVER=local only. The default (queue) driver runs
+# yt-dlp in the separate worker container and needs none of this.
+ARG YTDLP_VERSION=2026.10.16
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
- && rm -rf /var/lib/apt/lists/*
-ARG DOCKER_CLI_VERSION=27.2.0
-RUN curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_CLI_VERSION}.tgz" -o /tmp/docker.tgz \
- && tar -xzf /tmp/docker.tgz -C /tmp --strip-components=1 docker/docker \
- && install -m 0755 /tmp/docker /usr/local/bin/docker \
- && rm -f /tmp/docker.tgz /tmp/docker
+ && rm -rf /var/lib/apt/lists/* \
+ && curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp_linux" \
+      -o /usr/local/bin/yt-dlp \
+ && chmod 0755 /usr/local/bin/yt-dlp
 
 # Next.js standalone output already contains the traced production deps plus
 # the client assets staged by scripts/stage-standalone.mjs.
 COPY --from=builder /app/.next/standalone ./
 
-RUN mkdir -p /app/data
+RUN mkdir -p /app/data /app/spool \
+ && chown -R node:node /app/data /app/spool
 EXPOSE 3000
+
+# Never run the web app as root: it is exposed on the LAN by design, and this
+# is what keeps a future bug in the download path (or anywhere else) contained.
+USER node
+
 CMD ["node", "server.js"]

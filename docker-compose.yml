@@ -12,11 +12,31 @@ services:
       PORT: "3000"
       NODE_ENV: production
       MUSICSEER_DB_PATH: /app/data/musicseer.db
+      # Default driver: hand jobs to the worker below through the spool.
+      MUSICSEER_YTDLP_DRIVER: queue
+      MUSICSEER_SPOOL_PATH: /app/spool
     volumes:
       - ./data:/app/data
-      # Needed so music-seer can `docker run` the yt-dlp image on the host.
-      # Remove this if you use MUSICSEER_YTDLP_DRIVER=local.
-      - /var/run/docker.sock:/var/run/docker.sock
-# NOTE: MUSICSEER_INBOX_HOST_PATH / MUSICSEER_YTDLP_CONFIG_HOST_PATH in .env must
-# be paths as the DOCKER DAEMON sees them (host paths), not paths inside this
-# container. music-seer passes them straight to `docker run -v`.
+      - ./spool:/app/spool
+    # No Docker socket, and the app runs as a non-root user: the web app can
+    # write a job file, but it cannot start containers or otherwise reach the
+    # host. Anything it hands to the worker is an argv list for yt-dlp.
+    # Nothing here needs the inbox mounted — only the worker does.
+
+  # Runs the actual downloads. Give it the same inbox and config directory your
+  # standalone yt-dlp container uses.
+  ytdlp-worker:
+    image: ${MUSICSEER_YTDLP_IMAGE:-jauderho/yt-dlp:latest}
+    container_name: music-seer-ytdlp
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/worker/ytdlp-worker.sh"]
+    environment:
+      SPOOL_DIR: /spool
+      INBOX_DIR: /inbox
+      POLL_SECONDS: "5"
+    volumes:
+      - ./spool:/spool
+      # These two are HOST paths. Set them in .env.
+      - ${MUSICSEER_INBOX_HOST_PATH:?set MUSICSEER_INBOX_HOST_PATH in .env}:/inbox
+      - ${MUSICSEER_YTDLP_CONFIG_HOST_PATH:?set MUSICSEER_YTDLP_CONFIG_HOST_PATH in .env}:/config
+      - ./scripts/ytdlp-worker.sh:/worker/ytdlp-worker.sh:ro

@@ -1,5 +1,6 @@
 import { config } from "./config";
 import * as db from "./db";
+import { invalidateSuggestions } from "./discover";
 import * as jellyfin from "./jellyfin";
 import * as lidarr from "./lidarr";
 import { jellyfinReady, lidarrReady } from "./settings";
@@ -107,6 +108,8 @@ export async function createRequest(body: CreateRequestBody): Promise<CreateOutc
   }
 
   await submitToLidarr(request.id);
+  // The shelf should reflect this request straight away, not in 30 minutes.
+  invalidateSuggestions();
   return { request: db.getRequest(request.id)!, duplicate: false };
 }
 
@@ -394,6 +397,7 @@ export async function startFallback(requestId: number, reason: string): Promise<
   db.addEvent(requestId, "info", `Handing off to yt-dlp: ${reason}`);
 
   enqueueFallback(db.getRequest(requestId)!);
+  invalidateSuggestions();
 }
 
 /**
@@ -504,5 +508,6 @@ export function cancelRequest(requestId: number): MediaRequest | null {
     statusDetail: "Cancelled by user",
   });
   db.addEvent(requestId, "info", "Request cancelled");
+  invalidateSuggestions();
   return db.getRequest(requestId);
 }

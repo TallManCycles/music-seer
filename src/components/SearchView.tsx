@@ -13,7 +13,7 @@ const TABS: { type: MediaType; label: string; placeholder: string }[] = [
   { type: "track", label: "Tracks", placeholder: "Song — e.g. Get Lucky" },
 ];
 
-export default function SearchView() {
+export default function SearchView({ embedded = false }: { embedded?: boolean }) {
   const [type, setType] = useState<MediaType>("album");
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<Hit[]>([]);
@@ -97,13 +97,15 @@ export default function SearchView() {
 
   return (
     <div>
-      <div className="mb-6">
-        <h1 className="text-2xl font-semibold tracking-tight">Discover</h1>
-        <p className="mt-1 text-sm text-white/50">
-          Search MusicBrainz. Requests go to Lidarr first; anything Lidarr cannot deliver is handed
-          to yt-dlp automatically.
-        </p>
-      </div>
+      {!embedded && (
+        <div className="mb-6">
+          <h1 className="text-2xl font-semibold tracking-tight">Discover</h1>
+          <p className="mt-1 text-sm text-white/50">
+            Search MusicBrainz. Requests go to Lidarr first; anything Lidarr cannot deliver is
+            handed to yt-dlp automatically.
+          </p>
+        </div>
+      )}
 
       <div className="mb-4 flex flex-wrap gap-1 rounded-lg bg-ink-900 p-1 ring-1 ring-white/5">
         {TABS.map((t) => (
@@ -127,7 +129,7 @@ export default function SearchView() {
         onChange={(e) => setQuery(e.target.value)}
         placeholder={tab.placeholder}
         className="w-full rounded-lg border border-white/10 bg-ink-900 px-4 py-3 text-[15px] outline-none placeholder:text-white/30 focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
-        autoFocus
+        autoFocus={!embedded}
       />
 
       {notice && (

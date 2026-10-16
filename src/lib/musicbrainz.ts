@@ -151,6 +151,9 @@ export async function releaseGroupsForArtist(artistMbid: string, limit = 25): Pr
   const data = await mbFetch<{ "release-groups": MBReleaseGroup[] }>("release-group", {
     artist: artistMbid,
     type: "album",
+    // The browse endpoint does not credit artists unless asked, and an empty
+    // artist name propagates all the way into the request.
+    inc: "artist-credits",
     limit: String(limit),
     fmt: "json",
   });

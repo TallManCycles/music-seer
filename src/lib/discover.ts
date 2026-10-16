@@ -27,6 +27,8 @@ export interface Suggestion {
 export interface DiscoverResult {
   configured: boolean;
   error?: string;
+  /** An actionable explanation when there is nothing to suggest. */
+  note?: string;
   libraryAlbums: number;
   libraryArtists: number;
   suggestions: Suggestion[];
@@ -107,8 +109,12 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
     let discography: SearchResult[];
     try {
       discography = await releaseGroupsForArtist(artist.mbid!, ALBUMS_PER_ARTIST);
-    } catch {
-      failures += 1;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // A 404 means MusicBrainz has no such artist id — a stale or merged MBID
+      // in the library. That is not an outage, so skip it quietly rather than
+      // failing the whole shelf.
+      if (!/MusicBrainz 404/.test(message)) failures += 1;
       continue;
     }
 
@@ -122,8 +128,11 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
     pools.push(
       missing.map((album) => {
         const existing = requested.get(album.mbid);
+        // Belt and braces: a missing credit must never reach a request, so fall
+        // back to the artist we browsed.
+        const credited = { ...album, artist: album.artist || artist.name };
         return {
-          album,
+          album: credited,
           reason:
             artist.albums === 1
               ? `You have 1 album by ${artist.name}`
@@ -155,6 +164,12 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
     libraryArtists: artists.length,
     suggestions: out,
   };
+  if (artists.length > 0 && candidates.length === 0) {
+    // Empty for a reason the user can act on, so say so rather than showing a
+    // blank shelf.
+    value.note =
+      "None of your library artists carry a MusicBrainz id, so there is nothing to compare against. Turn on MusicBrainz metadata in Jellyfin.";
+  }
   // Only cache a result that is not simply "MusicBrainz was down".
   if (!(failures > 0 && failures === candidates.length && out.length === 0)) {
     cache = { at: Date.now(), value };

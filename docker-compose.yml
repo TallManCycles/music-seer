@@ -1,0 +1,22 @@
+services:
+  music-seer:
+    build: .
+    image: music-seer:latest
+    container_name: music-seer
+    restart: unless-stopped
+    ports:
+      - "8666:3000"
+    env_file:
+      - .env
+    environment:
+      PORT: "3000"
+      NODE_ENV: production
+      MUSICSEER_DB_PATH: /app/data/musicseer.db
+    volumes:
+      - ./data:/app/data
+      # Needed so music-seer can `docker run` the yt-dlp image on the host.
+      # Remove this if you use MUSICSEER_YTDLP_DRIVER=local.
+      - /var/run/docker.sock:/var/run/docker.sock
+# NOTE: MUSICSEER_INBOX_HOST_PATH / MUSICSEER_YTDLP_CONFIG_HOST_PATH in .env must
+# be paths as the DOCKER DAEMON sees them (host paths), not paths inside this
+# container. music-seer passes them straight to `docker run -v`.

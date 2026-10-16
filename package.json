@@ -1,0 +1,32 @@
+{
+  "name": "music-seer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Jellyseerr-style request management for music, backed by Lidarr with a yt-dlp fallback.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build && node scripts/stage-standalone.mjs",
+    "start": "node scripts/start.mjs",
+    "typecheck": "tsc --noEmit",
+    "probe": "node scripts/probe.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "next": "16.4.2",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.13.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.0"
+  }
+}

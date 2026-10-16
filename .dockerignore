@@ -1,0 +1,11 @@
+node_modules
+.next
+data
+.git
+.env
+.env.local
+*.db
+*.db-wal
+*.db-shm
+Dockerfile
+docker-compose.yml

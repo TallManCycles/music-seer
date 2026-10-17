@@ -60,6 +60,8 @@ export interface DiscoverResult {
   newReleases: Suggestion[];
   /** ListenBrainz's sitewide chart, minus anything you already have. */
   charts: ChartSuggestion[];
+  /** Why the chart is missing, when it is. */
+  chartsError?: string;
   /** The genres the suggestions were drawn from. */
   basedOn: string[];
 }
@@ -81,7 +83,7 @@ const NEW_RELEASE_LIMIT = 8;
 const CHART_LIMIT = 12;
 const CACHE_TTL_MS = 30 * 60 * 1000;
 
-let cache: { at: number; value: DiscoverResult } | null = null;
+let cache: { at: number; value: DiscoverResult; ownedNames: string[] } | null = null;
 
 /** Called when credentials change so a new library is not served stale advice. */
 export function invalidateSuggestions(): void {
@@ -174,48 +176,60 @@ interface LbRelease {
  * rather than presented as a recommendation, and anything by an artist already
  * in the library is dropped. One HTTP request, cached with the rest.
  */
-async function chartSuggestions(ownedNames: Set<string>, limit: number): Promise<ChartSuggestion[]> {
-  try {
-    const res = await fetch(`${LISTENBRAINZ}/stats/sitewide/releases?range=week`, {
-      headers: { Accept: "application/json", "User-Agent": config().userAgent },
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!res.ok) return [];
-    const body = (await res.json()) as { payload?: { releases?: LbRelease[] } };
-
-    const out: ChartSuggestion[] = [];
-    const seen = new Set<string>();
-    for (const release of body.payload?.releases ?? []) {
-      if (!release.release_mbid || !release.release_name) continue;
-      const artistKey = jellyfin.normalizeName(release.artist_name ?? "");
-      if (!artistKey || ownedNames.has(artistKey)) continue;
-
-      // ListenBrainz charts individual releases, so the same album appears once
-      // per edition. Collapse those before showing anything.
-      const key = `${artistKey}|${jellyfin.normalizeName(release.release_name)}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      out.push({
-        album: {
-          type: "album",
-          mbid: release.release_mbid,
-          title: release.release_name,
-          artist: release.artist_name,
-          artistMbid: release.artist_mbids?.[0],
-          coverUrl: coverArtUrlForRelease(release.caa_release_mbid),
-          subtitle: "Chart",
-        },
-        reason: `${release.listen_count.toLocaleString("en-AU")} listens this week`,
-        listenCount: release.listen_count,
+async function chartSuggestions(
+  ownedNames: Set<string>,
+  limit: number
+): Promise<{ charts: ChartSuggestion[]; error?: string }> {
+  // One retry: a single blip should not cost the shelf, and this is a cheap
+  // request next to the MusicBrainz work.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const res = await fetch(`${LISTENBRAINZ}/stats/sitewide/releases?range=week`, {
+        headers: { Accept: "application/json", "User-Agent": config().userAgent },
+        signal: AbortSignal.timeout(15_000),
       });
-      if (out.length >= limit) break;
+      if (!res.ok) {
+        if (attempt === 0) continue;
+        return { charts: [], error: `ListenBrainz answered ${res.status}` };
+      }
+      const body = (await res.json()) as { payload?: { releases?: LbRelease[] } };
+
+      const out: ChartSuggestion[] = [];
+      const seen = new Set<string>();
+      for (const release of body.payload?.releases ?? []) {
+        if (!release.release_mbid || !release.release_name) continue;
+        const artistKey = jellyfin.normalizeName(release.artist_name ?? "");
+        if (!artistKey || ownedNames.has(artistKey)) continue;
+
+        // ListenBrainz charts individual releases, so the same album appears
+        // once per edition. Collapse those before showing anything.
+        const key = `${artistKey}|${jellyfin.normalizeName(release.release_name)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        out.push({
+          album: {
+            type: "album",
+            mbid: release.release_mbid,
+            title: release.release_name,
+            artist: release.artist_name,
+            artistMbid: release.artist_mbids?.[0],
+            coverUrl: coverArtUrlForRelease(release.caa_release_mbid),
+            subtitle: "Chart",
+          },
+          reason: `${release.listen_count.toLocaleString("en-AU")} listens this week`,
+          listenCount: release.listen_count,
+        });
+        if (out.length >= limit) break;
+      }
+      return { charts: out };
+    } catch (err) {
+      if (attempt === 1) {
+        return { charts: [], error: err instanceof Error ? err.message : String(err) };
+      }
     }
-    return out;
-  } catch {
-    // A chart is a nice-to-have; never let it break the shelf.
-    return [];
   }
+  return { charts: [] };
 }
 
 export async function suggestions(limit = 24): Promise<DiscoverResult> {
@@ -231,7 +245,13 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
       basedOn: [],
     };
   }
-  if (cache && Date.now() - cache.at < CACHE_TTL_MS) return cache.value;
+  if (cache && Date.now() - cache.at < CACHE_TTL_MS) {
+    // The MusicBrainz work is what costs 20-odd seconds, so that is what gets
+    // cached. Charts are one cheap request and change hourly, so they are
+    // fetched fresh every time — which also means a blip cannot get baked into
+    // the cache for half an hour (it did, once).
+    return { ...cache.value, charts: (await chartSuggestions(new Set(cache.ownedNames), CHART_LIMIT)).charts };
+  }
 
   const albums = await jellyfin.listAlbums({ limit: 1000 });
   const { artists, keys } = artistsFromLibrary(albums);
@@ -368,6 +388,8 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
     }
   }
 
+  const chartResult = await chartSuggestions(ownedNames, CHART_LIMIT);
+
   const value: DiscoverResult = {
     configured: true,
     libraryAlbums: albums.length,
@@ -386,7 +408,8 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
           requestStatus: existing?.status,
         };
       }),
-    charts: await chartSuggestions(ownedNames, CHART_LIMIT),
+    charts: chartResult.charts,
+    chartsError: chartResult.error,
     basedOn: topGenres,
   };
   if (out.length === 0 && unresolved > 0 && unresolved === candidates.length) {
@@ -397,7 +420,7 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
   }
   // Only cache a result that is not simply "MusicBrainz was down".
   if (!(failures > 0 && failures === candidates.length && out.length === 0)) {
-    cache = { at: Date.now(), value };
+    cache = { at: Date.now(), value, ownedNames: [...ownedNames] };
   } else {
     value.error = "Could not reach MusicBrainz to build suggestions";
   }

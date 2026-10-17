@@ -337,7 +337,7 @@ export default function BrowseView() {
               }
             />
           ) : (
-            <ul className="flex snap-x gap-4 overflow-x-auto pb-2 scrollbar-none">
+            <ul className="scrollbar-none -mx-4 flex snap-x gap-4 overflow-x-auto overscroll-x-contain scroll-px-4 px-4 pb-2 sm:-mx-5 sm:scroll-px-5 sm:px-5">
               {discover.suggestions.map((s) => {
                 const ov = overrides[keyOf(s.album.type, s.album.mbid)];
                 const requestId = ov?.requestId ?? s.requestId;
@@ -390,7 +390,7 @@ export default function BrowseView() {
           {!discover ? (
             <ShelfSkeleton count={6} />
           ) : (
-            <ul className="flex snap-x gap-4 overflow-x-auto pb-2 scrollbar-none">
+            <ul className="scrollbar-none -mx-4 flex snap-x gap-4 overflow-x-auto overscroll-x-contain scroll-px-4 px-4 pb-2 sm:-mx-5 sm:scroll-px-5 sm:px-5">
               {(discover.newReleases ?? []).map((item) => {
                 const album = item.album;
                 const ov = overrides[keyOf(album.type, album.mbid)];
@@ -451,7 +451,7 @@ export default function BrowseView() {
               body="Add a few albums to your library and we will suggest artists you do not own."
             />
           ) : (
-            <ul className="flex snap-x gap-4 overflow-x-auto pb-2 scrollbar-none">
+            <ul className="scrollbar-none -mx-4 flex snap-x gap-4 overflow-x-auto overscroll-x-contain scroll-px-4 px-4 pb-2 sm:-mx-5 sm:scroll-px-5 sm:px-5">
               {(discover.newArtists ?? []).map((item) => {
                 const artist = item.artist;
                 const key = keyOf(artist.type, artist.mbid);
@@ -513,7 +513,7 @@ export default function BrowseView() {
           {!discover ? (
             <ShelfSkeleton count={6} />
           ) : (
-            <ul className="flex snap-x gap-4 overflow-x-auto pb-2 scrollbar-none">
+            <ul className="scrollbar-none -mx-4 flex snap-x gap-4 overflow-x-auto overscroll-x-contain scroll-px-4 px-4 pb-2 sm:-mx-5 sm:scroll-px-5 sm:px-5">
               {(discover.charts ?? []).map((item) => {
                 const album = item.album;
                 const ov = overrides[keyOf(album.type, album.mbid)];

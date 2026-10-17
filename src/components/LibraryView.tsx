@@ -146,7 +146,7 @@ export default function LibraryView() {
                 <>
                   <ul className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
                     {filtered.slice(0, visible).map((album) => (
-                      <li key={album.id}>
+                      <li key={album.id} className="min-w-0">
                         <AlbumTile
                           title={album.title}
                           artist={album.artist}

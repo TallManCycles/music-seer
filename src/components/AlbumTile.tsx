@@ -34,7 +34,7 @@ export default function AlbumTile({
   const coverAlt = artist ? `${title} — ${artist}` : title;
 
   return (
-    <article className={`group relative ${className}`}>
+    <article className={`group relative min-w-0 ${className}`}>
       <button
         type="button"
         onClick={onOpen}
@@ -73,7 +73,8 @@ export default function AlbumTile({
           onClick={onQuickRequest}
           disabled={quickBusy}
           aria-label={`Request ${title}`}
-          className="absolute right-2 top-2 grid h-9 w-9 place-items-center rounded-full bg-accent text-white shadow-lg ring-1 ring-white/25 transition opacity-0 hover:bg-accent-soft focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80 disabled:cursor-not-allowed disabled:opacity-60 group-hover:opacity-100 group-focus-within:opacity-100 motion-safe:hover:scale-105 motion-reduce:transition-none motion-reduce:hover:scale-100"
+          data-quick
+          className="absolute right-2 top-2 grid h-11 w-11 place-items-center rounded-full bg-accent text-white shadow-lg ring-1 ring-white/25 transition hover:bg-accent-soft focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80 disabled:cursor-not-allowed disabled:opacity-60 group-hover:opacity-100 group-focus-within:opacity-100 sm:h-9 sm:w-9 sm:opacity-0 motion-safe:hover:scale-105 motion-reduce:transition-none motion-reduce:hover:scale-100"
         >
           {quickBusy ? (
             <span className="h-3.5 w-3.5 animate-pulse-soft rounded-full bg-white/85" />

@@ -128,7 +128,7 @@ export default function SearchView({ embedded = false }: { embedded?: boolean })
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         placeholder={tab.placeholder}
-        className="w-full rounded-lg border border-white/10 bg-ink-900 px-4 py-3 text-[15px] outline-none placeholder:text-white/30 focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
+        className="w-full rounded-lg border border-white/10 bg-ink-900 px-4 py-3 text-base outline-none placeholder:text-white/30 focus:border-accent/60 focus:ring-2 focus:ring-accent/20 sm:text-[15px]"
         autoFocus={!embedded}
       />
 

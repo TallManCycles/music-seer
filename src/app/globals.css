@@ -18,6 +18,37 @@ html,
 body {
   background: var(--color-ink-950);
   color: #e8e8f0;
+  /* A single too-wide element (the nav, a shelf) otherwise widens the whole
+     document, which is what leaves a gutter beside every scroll. `clip` rather
+     than `hidden` so sticky positioning keeps working. */
+  overflow-x: clip;
+}
+
+/* Touch. Kill the tap flash and the double-tap-zoom delay; nothing here should
+   wait 300ms to see whether a second tap is coming. */
+html {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+a,
+[role="button"],
+input,
+select,
+textarea {
+  touch-action: manipulation;
+}
+
+/* Anything revealed by hover is unreachable on a touch screen, so show it. */
+@media (hover: none) {
+  [data-quick] {
+    opacity: 1;
+  }
+}
+
+/* Home-indicator / notch breathing room for the mobile tab bar. */
+.pb-safe {
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
 }
 
 * {

@@ -12,7 +12,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en">
       <body className="min-h-dvh bg-ink-950 antialiased">
         <Nav />
-        <main className="mx-auto max-w-6xl px-5 py-8">{children}</main>
+        {/* pb-24 on phones so the bottom tab bar never covers content. */}
+        <main className="mx-auto max-w-6xl px-4 py-6 pb-24 sm:px-5 sm:py-8 sm:pb-8">{children}</main>
       </body>
     </html>
   );

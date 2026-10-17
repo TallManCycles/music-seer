@@ -151,8 +151,15 @@ driver to work inside it.
 
 ## Composing it into an existing arrstack
 
-`docker-compose.arrstack.yml` references the published images and joins an
-existing docker network — no source tree needed on the host:
+If you would rather **add the two services to your own compose file** than run a
+separate one, use [`docs/arrstack-snippet.yml`](docs/arrstack-snippet.yml) —
+paste it into your `services:` block and change nothing else. It joins your
+existing network and reaches Lidarr through gluetun the same way the rest of the
+stack does.
+
+`docker-compose.arrstack.yml` is the standalone equivalent: it references the
+published images and joins an existing docker network — no source tree needed on
+the host:
 
 ```bash
 mkdir -p /path/to/music-seer && cd /path/to/music-seer

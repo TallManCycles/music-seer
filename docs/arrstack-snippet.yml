@@ -1,0 +1,83 @@
+# music-seer for an EXISTING arrstack compose file.
+#
+# Paste these two services into the `services:` block of your own
+# docker-compose.yml, above the `networks:` block. Nothing else needs changing:
+# it joins your existing `local-docker` network and talks to Lidarr through
+# gluetun, exactly like the rest of the stack.
+#
+# Before the first `up`, create the folders (docker would otherwise create them
+# as root, and both containers run as uid 1000):
+#
+#   mkdir -p /media/aaron/local/arrstack/music-seer/{data,spool,ytdlp-config}
+#   mkdir -p /mnt/nas/aaron/music-inbox
+#   sudo chown -R 1000:1000 /media/aaron/local/arrstack/music-seer /mnt/nas/aaron/music-inbox
+#
+# Notes on the choices here:
+#   * Neither service sits behind gluetun. The app must be reachable by your
+#     reverse proxy, and the worker is not a torrent client — it needs the NAS
+#     and Lidarr, not anonymity. There is a commented variant below if you would
+#     rather YouTube saw your VPN address.
+#   * The worker runs as `user: "1000:1000"` rather than PUID/PGID: those are
+#     linuxserver conventions, and this image is not one of theirs.
+#   * MUSICSEER_LIDARR_ROOT_FOLDER is Lidarr's OWN path (/music), not the host
+#     path it maps to (/mnt/nas/aaron/music-clean).
+#   * The two *_CONTAINER_PATH values must match the worker's mount targets
+#     below — that is why the same value appears in both places.
+
+  music-seer:
+    image: ghcr.io/tallmancycles/music-seer:latest
+    container_name: music-seer
+    restart: unless-stopped
+    networks:
+      - default
+    ports:
+      # Reverse proxy target: http://<host>:8666
+      - 8666:3000
+    environment:
+      - TZ=Australia/Brisbane
+      - PORT=3000
+      - MUSICSEER_YTDLP_DRIVER=queue
+      - MUSICSEER_DB_PATH=/app/data/musicseer.db
+      - MUSICSEER_SPOOL_PATH=/app/spool
+      # Lidarr shares gluetun's network namespace, so it answers on gluetun.
+      - MUSICSEER_LIDARR_URL=http://gluetun:8686
+      # The root folder AS LIDARR SEES IT.
+      - MUSICSEER_LIDARR_ROOT_FOLDER=/music
+      - MUSICSEER_JELLYFIN_URL=http://192.168.0.201:8096
+      # Where downloads land, and where the yt-dlp archive lives (host paths).
+      - MUSICSEER_INBOX_DIR=/mnt/nas/aaron/music-inbox
+      - MUSICSEER_CONFIG_DIR=/media/aaron/local/arrstack/music-seer/ytdlp-config
+      - MUSICSEER_INBOX_CONTAINER_PATH=/inbox
+      - MUSICSEER_YTDLP_CONFIG_CONTAINER_PATH=/config
+    volumes:
+      - /media/aaron/local/arrstack/music-seer/data:/app/data
+      - /media/aaron/local/arrstack/music-seer/spool:/app/spool
+
+  music-seer-ytdlp:
+    image: ghcr.io/tallmancycles/music-seer-ytdlp:latest
+    container_name: music-seer-ytdlp
+    restart: unless-stopped
+    networks:
+      - default
+    # Match the rest of the stack so downloads are not root-owned.
+    user: "1000:1000"
+    environment:
+      - TZ=Australia/Brisbane
+      - SPOOL_DIR=/spool
+      - INBOX_DIR=/inbox
+      - POLL_SECONDS=5
+    volumes:
+      - /media/aaron/local/arrstack/music-seer/spool:/spool
+      - /mnt/nas/aaron/music-inbox:/inbox
+      - /media/aaron/local/arrstack/music-seer/ytdlp-config:/config
+
+  # --- Variant: run the worker through the VPN -------------------------------
+  # If YouTube should see your VPN address, replace the worker's `networks:`
+  # block with the two lines below. A container cannot have both `networks:`
+  # and `network_mode:`, and it needs no published ports either way.
+  #
+  #   network_mode: "service:gluetun"
+  #   depends_on:
+  #     gluetun:
+  #       condition: service_healthy
+  #       restart: true

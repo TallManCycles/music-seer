@@ -1,6 +1,6 @@
 import * as db from "./db";
 import * as jellyfin from "./jellyfin";
-import { releaseGroupsForArtist } from "./musicbrainz";
+import { releaseGroupsForArtist, search as mbSearch } from "./musicbrainz";
 import { jellyfinReady } from "./settings";
 import type { SearchResult } from "./types";
 
@@ -89,6 +89,27 @@ function artistsFromLibrary(albums: jellyfin.JellyfinItem[]): {
   return { artists, keys };
 }
 
+/**
+ * The MusicBrainz artist id for a library artist.
+ *
+ * Jellyfin's MusicBrainz plugin is the reliable source, but plenty of libraries
+ * have no provider ids at all (this one included), so fall back to searching
+ * MusicBrainz by name. That needs to be strict: only an exact normalised name
+ * match counts, because binding an artist to the wrong MusicBrainz entry
+ * suggests the wrong discography entirely.
+ */
+async function resolveArtistMbid(artist: LibraryArtist): Promise<string | undefined> {
+  if (artist.mbid) return artist.mbid;
+  try {
+    const results = await mbSearch(artist.name, "artist");
+    const wanted = jellyfin.normalizeName(artist.name);
+    const exact = results.find((r) => jellyfin.normalizeName(r.title) === wanted);
+    return exact?.mbid;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function suggestions(limit = 24): Promise<DiscoverResult> {
   if (!jellyfinReady()) {
     return { configured: false, libraryAlbums: 0, libraryArtists: 0, suggestions: [] };
@@ -98,17 +119,24 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
   const albums = await jellyfin.listAlbums({ limit: 1000 });
   const { artists, keys } = artistsFromLibrary(albums);
 
-  // Without a MusicBrainz id we would have to guess which artist a name refers
-  // to, and a wrong guess suggests the wrong discography. Skip those.
-  const candidates = artists.filter((a) => a.mbid).slice(0, MAX_ARTISTS);
+  // Artists with an id straight from Jellyfin come first, then the biggest
+  // collections; the rest are resolved by name, one MusicBrainz call each.
+  const candidates = artists.slice(0, MAX_ARTISTS);
 
   const pools: Suggestion[][] = [];
   let failures = 0;
+  let unresolved = 0;
 
   for (const artist of candidates) {
+    const mbid = await resolveArtistMbid(artist);
+    if (!mbid) {
+      unresolved += 1;
+      continue;
+    }
+
     let discography: SearchResult[];
     try {
-      discography = await releaseGroupsForArtist(artist.mbid!, ALBUMS_PER_ARTIST);
+      discography = await releaseGroupsForArtist(mbid, ALBUMS_PER_ARTIST);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // A 404 means MusicBrainz has no such artist id — a stale or merged MBID
@@ -164,11 +192,11 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
     libraryArtists: artists.length,
     suggestions: out,
   };
-  if (artists.length > 0 && candidates.length === 0) {
+  if (out.length === 0 && unresolved > 0 && unresolved === candidates.length) {
     // Empty for a reason the user can act on, so say so rather than showing a
     // blank shelf.
     value.note =
-      "None of your library artists carry a MusicBrainz id, so there is nothing to compare against. Turn on MusicBrainz metadata in Jellyfin.";
+      "None of the artists in your library could be matched on MusicBrainz by name, so there is nothing to compare against. Turning on MusicBrainz metadata in Jellyfin makes this exact rather than a name guess.";
   }
   // Only cache a result that is not simply "MusicBrainz was down".
   if (!(failures > 0 && failures === candidates.length && out.length === 0)) {

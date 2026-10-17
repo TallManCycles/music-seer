@@ -145,7 +145,22 @@ export function coverArtUrl(releaseGroupMbid: string | undefined, size = 250): s
  * An artist's studio albums, by MBID (the browse endpoint, not search — so the
  * results really are that artist's albums). Used to suggest what is missing
  * from a library that already has the artist.
+ *
+ * Live albums, compilations and the like are filtered out: "you have 18 albums
+ * by this artist" should suggest the records they are missing, not a live
+ * recording of the ones they already own.
  */
+const NON_STUDIO = new Set([
+  "Live",
+  "Compilation",
+  "Remix",
+  "DJ-mix",
+  "Interview",
+  "Audiobook",
+  "Spokenword",
+  "Mixtape/Street",
+]);
+
 export async function releaseGroupsForArtist(artistMbid: string, limit = 25): Promise<SearchResult[]> {
   if (!artistMbid) return [];
   const data = await mbFetch<{ "release-groups": MBReleaseGroup[] }>("release-group", {
@@ -159,6 +174,7 @@ export async function releaseGroupsForArtist(artistMbid: string, limit = 25): Pr
   });
 
   return (data["release-groups"] ?? [])
+    .filter((rg) => !(rg["secondary-types"] ?? []).some((t) => NON_STUDIO.has(t)))
     .map((rg) => ({
       type: "album" as const,
       mbid: rg.id,

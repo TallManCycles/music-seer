@@ -39,7 +39,11 @@ ARG YTDLP_VERSION=2026.10.16
 
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
-    PORT=3000
+    PORT=3000 \
+    # Next's standalone server binds to $HOSTNAME, which in a container defaults
+    # to the container id — so it listens on that one address and refuses
+    # loopback. That breaks healthchecks (and anything expecting 0.0.0.0).
+    HOSTNAME=0.0.0.0
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \

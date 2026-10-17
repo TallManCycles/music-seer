@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import SearchView from "./SearchView";
 import AlbumTile from "./AlbumTile";
@@ -9,16 +9,6 @@ import AlbumDetailModal, { type AlbumDetailItem } from "./AlbumDetailModal";
 import StatusBadge from "./StatusBadge";
 import Toast from "./Toast";
 import type { RequestStatus } from "@/lib/types";
-
-interface LibraryAlbum {
-  id: string;
-  title: string;
-  artist: string;
-  year?: string;
-  hasArt: boolean;
-  coverUrl: string;
-  artistMbid?: string;
-}
 
 interface DiscoverAlbum {
   type: "album";
@@ -74,14 +64,6 @@ interface ChartEntry {
   requestStatus?: RequestStatus;
 }
 
-interface LibraryPayload {
-  configured: boolean;
-  total: number;
-  needsSetup?: boolean;
-  albums: LibraryAlbum[];
-  error?: string;
-}
-
 interface DiscoverPayload {
   configured: boolean;
   libraryAlbums: number;
@@ -109,9 +91,6 @@ interface Override {
 
 const keyOf = (type: string, mbid: string) => `${type}:${mbid}`;
 
-/** How many library albums to render before deferring to search. */
-const LIBRARY_LIMIT = 60;
-
 function suggestionCover(album: DiscoverAlbum): string {
   const mbid = album.releaseGroupMbid ?? album.mbid;
   return `/api/cover?mbid=${mbid}&size=300`;
@@ -124,8 +103,6 @@ function joinGenres(genres: string[]): string {
 }
 
 export default function BrowseView() {
-  const [library, setLibrary] = useState<LibraryPayload | null>(null);
-  const [libraryError, setLibraryError] = useState<string | null>(null);
   const [discover, setDiscover] = useState<DiscoverPayload | null>(null);
   const [discoverError, setDiscoverError] = useState<string | null>(null);
 
@@ -133,26 +110,6 @@ export default function BrowseView() {
   const [detail, setDetail] = useState<AlbumDetailItem | null>(null);
   const [toast, setToast] = useState<{ message: string; tone: "info" | "error" } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    const ctrl = new AbortController();
-    (async () => {
-      try {
-        const res = await fetch("/api/library?limit=200", {
-          cache: "no-store",
-          signal: ctrl.signal,
-        });
-        const data: LibraryPayload = await res.json();
-        if (!res.ok) throw new Error(data.error ?? "could not load your library");
-        setLibrary(data);
-        setLibraryError(data.error ?? null);
-      } catch (err) {
-        if ((err as Error).name === "AbortError") return;
-        setLibraryError(err instanceof Error ? err.message : "could not load your library");
-      }
-    })();
-    return () => ctrl.abort();
-  }, []);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -272,19 +229,6 @@ export default function BrowseView() {
     [showToast]
   );
 
-  const openLibrary = useCallback((album: LibraryAlbum) => {
-    setDetail({
-      type: "album",
-      mbid: album.id,
-      title: album.title,
-      artist: album.artist,
-      year: album.year,
-      artistMbid: album.artistMbid,
-      coverSrc: album.coverUrl,
-      inLibrary: true,
-    });
-  }, []);
-
   const openSuggestion = useCallback(
     (s: Suggestion) => {
       const album = s.album;
@@ -308,15 +252,7 @@ export default function BrowseView() {
     [overrides]
   );
 
-  const needsSetup = useMemo(
-    () =>
-      Boolean(
-        library?.needsSetup ||
-          library?.configured === false ||
-          discover?.configured === false
-      ),
-    [library, discover]
-  );
+  const needsSetup = discover?.configured === false;
 
   const detailKey = detail ? keyOf(detail.type, detail.mbid) : null;
   const detailBusy = detailKey ? overrides[detailKey]?.busy : false;
@@ -337,11 +273,17 @@ export default function BrowseView() {
         <div className="mt-5">
           <SearchView embedded />
         </div>
-        {(library || discover) && (
+        <Link
+          href="/library"
+          className="mt-4 inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-3.5 py-2 text-sm font-medium text-white/85 transition hover:border-white/20 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 focus-visible:ring-offset-2 focus-visible:ring-offset-ink-950 motion-reduce:transition-none"
+        >
+          Browse all your albums →
+        </Link>
+        {discover && (
           <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-white/45">
-            {library && <span>{library.total} albums in your library</span>}
-            {discover && <span>{discover.libraryArtists} artists</span>}
-            {discover && discover.suggestions.length > 0 && (
+            <span>{discover.libraryAlbums} albums in your library</span>
+            <span>{discover.libraryArtists} artists</span>
+            {discover.suggestions.length > 0 && (
               <span>{discover.suggestions.length} suggestions</span>
             )}
           </div>
@@ -361,54 +303,6 @@ export default function BrowseView() {
           >
             Open settings
           </Link>
-        </section>
-      )}
-
-      {libraryError && (
-        <Notice tone="warn">Your library could not be read: {libraryError}</Notice>
-      )}
-
-      {!needsSetup && (
-        <section className="mt-10">
-          <header className="mb-4 flex flex-wrap items-baseline justify-between gap-2">
-            <div>
-              <h2 className="text-lg font-semibold tracking-tight">Your library</h2>
-              <p className="mt-0.5 text-sm text-white/45">
-                Everything Jellyfin can see, newest first.
-              </p>
-            </div>
-            {library && <span className="text-xs text-white/40">{library.total} albums</span>}
-          </header>
-
-          {!library ? (
-            <AlbumGridSkeleton count={12} />
-          ) : library.albums.length === 0 ? (
-            <EmptyState
-              title="Your library is empty"
-              body="Once Jellyfin has albums, they will show up here as a grid."
-            />
-          ) : (
-            <>
-              <ul className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
-                {library.albums.slice(0, LIBRARY_LIMIT).map((album) => (
-                  <li key={album.id}>
-                    <AlbumTile
-                      title={album.title}
-                      artist={album.artist}
-                      year={album.year}
-                      coverSrc={album.hasArt ? album.coverUrl : undefined}
-                      onOpen={() => openLibrary(album)}
-                    />
-                  </li>
-                ))}
-              </ul>
-              {library.albums.length > LIBRARY_LIMIT && (
-                <p className="mt-5 text-sm text-white/45">
-                  Showing the first {LIBRARY_LIMIT} of your library — use search to find the rest.
-                </p>
-              )}
-            </>
-          )}
         </section>
       )}
 
@@ -686,23 +580,6 @@ function EmptyState({ title, body }: { title: string; body: string }) {
       <p className="text-sm font-medium text-white/70">{title}</p>
       <p className="mx-auto mt-1 max-w-sm text-sm text-white/40">{body}</p>
     </div>
-  );
-}
-
-function AlbumGridSkeleton({ count }: { count: number }) {
-  return (
-    <ul
-      className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6"
-      aria-hidden
-    >
-      {Array.from({ length: count }).map((_, i) => (
-        <li key={i}>
-          <div className="aspect-square w-full animate-pulse-soft rounded-xl bg-ink-800" />
-          <div className="mt-2.5 h-3.5 w-3/4 animate-pulse-soft rounded bg-ink-800" />
-          <div className="mt-1.5 h-3 w-1/2 animate-pulse-soft rounded bg-ink-850" />
-        </li>
-      ))}
-    </ul>
   );
 }
 

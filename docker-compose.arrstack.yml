@@ -1,0 +1,70 @@
+# music-seer, joined to an existing arrstack.
+#
+# Use this instead of the plain docker-compose.yml when your stack already runs
+# on the external `local-docker` network (gluetun + the *arr apps).
+#
+#   docker compose -f docker-compose.arrstack.yml up -d --build
+#
+# Why this file exists rather than an override: Lidarr here runs with
+# `network_mode: service:gluetun`, so it has no network identity of its own and
+# no `lidarr` hostname. It is reachable as `gluetun:8686` from inside the
+# network, and only through gluetun from the LAN.
+
+services:
+  music-seer:
+    build: .
+    image: music-seer:latest
+    container_name: music-seer
+    restart: unless-stopped
+    ports:
+      - "8666:3000"
+    env_file:
+      - .env
+    environment:
+      PORT: "3000"
+      NODE_ENV: production
+      MUSICSEER_DB_PATH: /app/data/musicseer.db
+      MUSICSEER_YTDLP_DRIVER: queue
+      MUSICSEER_SPOOL_PATH: /app/spool
+      # Lidarr shares gluetun's network namespace.
+      MUSICSEER_LIDARR_URL: http://gluetun:8686
+      # The root folder as LIDARR sees it, not the host path.
+      MUSICSEER_LIDARR_ROOT_FOLDER: /music
+      MUSICSEER_JELLYFIN_URL: http://192.168.0.201:8096
+      # Paths as the WORKER sees them — these are what end up in yt-dlp's argv.
+      MUSICSEER_INBOX_CONTAINER_PATH: /inbox
+      MUSICSEER_YTDLP_CONFIG_CONTAINER_PATH: /config
+    volumes:
+      - ./data:/app/data
+      - ./spool:/app/spool
+    networks:
+      - local-docker
+    # The app itself runs as a non-root user and holds no docker socket: it can
+    # write a job file, and nothing more.
+
+  # Runs the actual downloads. Deliberately NOT behind gluetun by default:
+  # it needs to reach this NAS and Lidarr, and it is not a torrent client. Add
+  # `network_mode: service:gluetun` (and drop `networks:`) if you would rather
+  # YouTube saw your VPN address.
+  ytdlp-worker:
+    image: ${MUSICSEER_YTDLP_IMAGE:-jauderho/yt-dlp:latest}
+    container_name: music-seer-ytdlp
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/worker/ytdlp-worker.sh"]
+    environment:
+      SPOOL_DIR: /spool
+      INBOX_DIR: /inbox
+      POLL_SECONDS: "5"
+    volumes:
+      - ./spool:/spool
+      # Downloads land here, NOT in the library.
+      - /mnt/nas/aaron/music-inbox:/inbox
+      # Holds the download archive, so nothing is fetched twice.
+      - /mnt/nas/aaron/ytdlp-config:/config
+      - ./scripts/ytdlp-worker.sh:/worker/ytdlp-worker.sh:ro
+    networks:
+      - local-docker
+
+networks:
+  local-docker:
+    external: true

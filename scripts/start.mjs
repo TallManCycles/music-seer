@@ -14,6 +14,10 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const server = path.join(root, ".next", "standalone", "server.js");
 
 process.env.MUSICSEER_DB_PATH ??= path.join(root, "data", "musicseer.db");
+// Same trap as the database: the spool is a directory of live job files, and
+// resolving "./spool" after the standalone server has chdir()'d would put it
+// inside .next/ and throw away queued work on the next build.
+process.env.MUSICSEER_SPOOL_PATH ??= path.join(root, "spool");
 
 // A bare absolute path is not a valid ESM specifier on Windows.
 await import(pathToFileURL(server).href);

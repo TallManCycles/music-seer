@@ -90,6 +90,38 @@ Two things worth understanding before you start:
    them in with Lidarr's import (the *Ask Lidarr to import* button triggers
    `DownloadedAlbumsScan`) or your own tooling.
 
+### Joining an existing arrstack
+
+If your *arr apps already run on a shared docker network (typically behind
+gluetun), use the compose file built for that instead:
+
+```bash
+docker compose -f docker-compose.arrstack.yml up -d --build
+```
+
+It attaches music-seer and the worker to the external `local-docker` network and
+assumes the two things that follow from that setup:
+
+- **Lidarr has no hostname of its own.** With `network_mode: "service:gluetun"`
+  it shares gluetun's network namespace, so it is reachable as
+  `http://gluetun:8686` from inside the network — `http://lidarr:8686` will not
+  resolve. From the LAN it is whatever port gluetun publishes.
+- **Lidarr's root folder is its *container* path**, e.g. `/music`, not the host
+  path it maps to (`/mnt/nas/aaron/music-clean`). `MUSICSEER_LIDARR_ROOT_FOLDER`
+  must be the path Lidarr itself sees.
+
+The worker mounts the inbox and the yt-dlp config directory; both must exist on
+the host first:
+
+```bash
+mkdir -p /mnt/nas/aaron/music-inbox /mnt/nas/aaron/ytdlp-config
+```
+
+The worker is deliberately **not** behind gluetun by default — it is not a
+torrent client and it needs to reach the NAS and Lidarr. If you would rather
+YouTube saw your VPN address, give it `network_mode: service:gluetun` and drop
+its `networks:` entry.
+
 ### Without Docker
 
 ```bash
@@ -99,8 +131,9 @@ PORT=8666 npm start   # http://localhost:8666
 ```
 
 `npm start` runs Next's standalone server and pins the database to
-`./data/musicseer.db` (Next's standalone `server.js` changes its working
-directory at boot, so a relative path would otherwise land inside `.next/`).
+`./data/musicseer.db` and the job spool to `./spool` (Next's standalone
+`server.js` changes its working directory at boot, so relative paths would
+otherwise land inside `.next/` and be wiped by the next build).
 It does **not** read `.env` — pass settings in the environment, or use
 `docker compose`, which reads `.env` via `env_file`. The standalone server
 listens on `PORT` (3000 unless you set it).

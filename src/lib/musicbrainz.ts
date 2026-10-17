@@ -92,8 +92,15 @@ interface MBArtist {
   id: string;
   name: string;
   "sort-name"?: string;
+  type?: string;
+  country?: string;
   "life-span"?: { begin?: string };
   disambiguation?: string;
+}
+
+export interface MBGenre {
+  name: string;
+  count: number;
 }
 
 interface MBReleaseGroup {
@@ -104,6 +111,8 @@ interface MBReleaseGroup {
   "first-release-date"?: string;
   "artist-credit"?: ArtistCredit[];
   "release-count"?: number;
+  /** Present when the request asks for inc=genres. Curated, unlike tags. */
+  genres?: Array<{ name: string; count: number }>;
 }
 
 interface MBRecording {
@@ -161,19 +170,38 @@ const NON_STUDIO = new Set([
   "Mixtape/Street",
 ]);
 
-export async function releaseGroupsForArtist(artistMbid: string, limit = 25): Promise<SearchResult[]> {
-  if (!artistMbid) return [];
+export interface Discography {
+  albums: SearchResult[];
+  /** Genres aggregated across the albums, most-tagged first. */
+  genres: MBGenre[];
+}
+
+export async function releaseGroupsForArtist(artistMbid: string, limit = 25): Promise<Discography> {
+  if (!artistMbid) return { albums: [], genres: [] };
   const data = await mbFetch<{ "release-groups": MBReleaseGroup[] }>("release-group", {
     artist: artistMbid,
     type: "album",
     // The browse endpoint does not credit artists unless asked, and an empty
-    // artist name propagates all the way into the request.
-    inc: "artist-credits",
+    // artist name propagates all the way into the request. `genres` rides along
+    // for free and is what the discovery shelf builds a taste profile from.
+    inc: "artist-credits+genres",
     limit: String(limit),
     fmt: "json",
   });
 
-  return (data["release-groups"] ?? [])
+  const groups = data["release-groups"] ?? [];
+
+  const genreCounts = new Map<string, number>();
+  for (const rg of groups) {
+    for (const genre of rg.genres ?? []) {
+      genreCounts.set(genre.name, (genreCounts.get(genre.name) ?? 0) + (genre.count || 1));
+    }
+  }
+  const genres = [...genreCounts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count);
+
+  const albums = groups
     .filter((rg) => !(rg["secondary-types"] ?? []).some((t) => NON_STUDIO.has(t)))
     .map((rg) => ({
       type: "album" as const,
@@ -187,6 +215,33 @@ export async function releaseGroupsForArtist(artistMbid: string, limit = 25): Pr
       subtitle: [rg["primary-type"], ...(rg["secondary-types"] ?? [])].filter(Boolean).join(" · "),
     }))
     .sort((a, b) => (b.year ?? "").localeCompare(a.year ?? ""));
+
+  return { albums, genres };
+}
+
+/**
+ * Artists carrying a genre tag, for the discovery shelf. MusicBrainz's search
+ * ranks by relevance, which is the only popularity signal available — it is why
+ * this is filtered and explained rather than presented as a recommendation
+ * engine.
+ */
+export async function artistsByGenre(genre: string, limit = 20): Promise<SearchResult[]> {
+  if (!genre.trim()) return [];
+  const data = await mbFetch<{ artists: MBArtist[] }>("artist", {
+    query: `tag:"${genre.replace(/"/g, "")}" AND type:group`,
+    limit: String(limit),
+    fmt: "json",
+  });
+
+  return (data.artists ?? []).map((a) => ({
+    type: "artist" as const,
+    mbid: a.id,
+    title: a.name,
+    artist: "",
+    artistMbid: a.id,
+    year: yearOf(a["life-span"]?.begin),
+    subtitle: [a.type, a.country].filter(Boolean).join(" · "),
+  }));
 }
 
 export async function search(query: string, type: MediaType): Promise<SearchResult[]> {

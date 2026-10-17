@@ -1,6 +1,6 @@
 import * as db from "./db";
 import * as jellyfin from "./jellyfin";
-import { releaseGroupsForArtist, search as mbSearch } from "./musicbrainz";
+import { artistsByGenre, releaseGroupsForArtist, search as mbSearch } from "./musicbrainz";
 import { jellyfinReady } from "./settings";
 import type { SearchResult } from "./types";
 
@@ -24,6 +24,14 @@ export interface Suggestion {
   requestStatus?: string;
 }
 
+/** An artist you do not have, drawn from the genres your library leans on. */
+export interface ArtistSuggestion {
+  artist: SearchResult;
+  reason: string;
+  requestId?: number;
+  requestStatus?: string;
+}
+
 export interface DiscoverResult {
   configured: boolean;
   error?: string;
@@ -32,10 +40,16 @@ export interface DiscoverResult {
   libraryAlbums: number;
   libraryArtists: number;
   suggestions: Suggestion[];
+  newArtists: ArtistSuggestion[];
+  /** The genres the suggestions were drawn from. */
+  basedOn: string[];
 }
 
 const MAX_ARTISTS = 4;
 const ALBUMS_PER_ARTIST = 25;
+/** How many of the library's top genres to look for new artists in. */
+const GENRES_FOR_DISCOVERY = 2;
+const NEW_ARTIST_LIMIT = 8;
 const CACHE_TTL_MS = 30 * 60 * 1000;
 
 let cache: { at: number; value: DiscoverResult } | null = null;
@@ -112,7 +126,14 @@ async function resolveArtistMbid(artist: LibraryArtist): Promise<string | undefi
 
 export async function suggestions(limit = 24): Promise<DiscoverResult> {
   if (!jellyfinReady()) {
-    return { configured: false, libraryAlbums: 0, libraryArtists: 0, suggestions: [] };
+    return {
+      configured: false,
+      libraryAlbums: 0,
+      libraryArtists: 0,
+      suggestions: [],
+      newArtists: [],
+      basedOn: [],
+    };
   }
   if (cache && Date.now() - cache.at < CACHE_TTL_MS) return cache.value;
 
@@ -124,6 +145,7 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
   const candidates = artists.slice(0, MAX_ARTISTS);
 
   const pools: Suggestion[][] = [];
+  const genreWeights = new Map<string, number>();
   let failures = 0;
   let unresolved = 0;
 
@@ -134,7 +156,7 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
       continue;
     }
 
-    let discography: SearchResult[];
+    let discography: Awaited<ReturnType<typeof releaseGroupsForArtist>>;
     try {
       discography = await releaseGroupsForArtist(mbid, ALBUMS_PER_ARTIST);
     } catch (err) {
@@ -146,7 +168,13 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
       continue;
     }
 
-    const missing = discography.filter((album) => {
+    // Genres come from the discography call itself, so the taste profile is
+    // free. Weighted by how many of the artist's albums carry each genre.
+    for (const genre of discography.genres) {
+      genreWeights.set(genre.name, (genreWeights.get(genre.name) ?? 0) + genre.count);
+    }
+
+    const missing = discography.albums.filter((album) => {
       const credited = album.artist || artist.name;
       return !keys.has(albumKey(credited, album.title)) && !keys.has(albumKey(artist.name, album.title));
     });
@@ -186,11 +214,51 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
     if (!added) break;
   }
 
+  // --- new artists ---------------------------------------------------------
+  // The genres this library leans on, then well-known groups in those genres
+  // that the library does not already have. MusicBrainz ranks its search by
+  // relevance, which is the only popularity signal available — so this is
+  // presented with its reason rather than as a recommendation engine.
+  const ownedNames = new Set(artists.map((a) => jellyfin.normalizeName(a.name)));
+  const topGenres = [...genreWeights.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, GENRES_FOR_DISCOVERY)
+    .map(([name]) => name);
+
+  const requested = new Map(db.listRequests().map((r) => [r.mbid, r] as const));
+  const newArtists: ArtistSuggestion[] = [];
+  const seenArtists = new Set<string>();
+
+  for (const genre of topGenres) {
+    if (newArtists.length >= NEW_ARTIST_LIMIT) break;
+    let found: SearchResult[];
+    try {
+      found = await artistsByGenre(genre, 20);
+    } catch {
+      continue;
+    }
+    for (const candidate of found) {
+      if (newArtists.length >= NEW_ARTIST_LIMIT) break;
+      const key = jellyfin.normalizeName(candidate.title);
+      if (!key || ownedNames.has(key) || seenArtists.has(key)) continue;
+      seenArtists.add(key);
+      const existing = requested.get(candidate.mbid);
+      newArtists.push({
+        artist: candidate,
+        reason: `You listen to a lot of ${genre}`,
+        requestId: existing?.id,
+        requestStatus: existing?.status,
+      });
+    }
+  }
+
   const value: DiscoverResult = {
     configured: true,
     libraryAlbums: albums.length,
     libraryArtists: artists.length,
     suggestions: out,
+    newArtists,
+    basedOn: topGenres,
   };
   if (out.length === 0 && unresolved > 0 && unresolved === candidates.length) {
     // Empty for a reason the user can act on, so say so rather than showing a

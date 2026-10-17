@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import SearchView from "./SearchView";
 import AlbumTile from "./AlbumTile";
+import AlbumCover from "./AlbumCover";
 import AlbumDetailModal, { type AlbumDetailItem } from "./AlbumDetailModal";
 import StatusBadge from "./StatusBadge";
 import Toast from "./Toast";
@@ -38,6 +39,24 @@ interface Suggestion {
   requestStatus?: RequestStatus;
 }
 
+interface DiscoverArtist {
+  type: "artist";
+  mbid: string;
+  title: string;
+  artist: string;
+  artistMbid?: string;
+  year?: string;
+  /** e.g. "Group · GB" */
+  subtitle?: string;
+}
+
+interface NewArtist {
+  artist: DiscoverArtist;
+  reason: string;
+  requestId?: number;
+  requestStatus?: RequestStatus;
+}
+
 interface LibraryPayload {
   configured: boolean;
   total: number;
@@ -51,6 +70,10 @@ interface DiscoverPayload {
   libraryAlbums: number;
   libraryArtists: number;
   suggestions: Suggestion[];
+  /** Artists the listener does not own yet, suggested from their genres. */
+  newArtists?: NewArtist[];
+  /** The genres the suggestions came from, e.g. ["rock", "pop rock"]. */
+  basedOn?: string[];
   error?: string;
   /** Why there is nothing to suggest, when there is a fixable reason. */
   note?: string;
@@ -65,9 +88,18 @@ interface Override {
 
 const keyOf = (type: string, mbid: string) => `${type}:${mbid}`;
 
+/** How many library albums to render before deferring to search. */
+const LIBRARY_LIMIT = 60;
+
 function suggestionCover(album: DiscoverAlbum): string {
   const mbid = album.releaseGroupMbid ?? album.mbid;
   return `/api/cover?mbid=${mbid}&size=300`;
+}
+
+/** "rock and pop rock" from ["rock", "pop rock"]. */
+function joinGenres(genres: string[]): string {
+  if (genres.length <= 1) return genres[0] ?? "";
+  return `${genres.slice(0, -1).join(", ")} and ${genres[genres.length - 1]}`;
 }
 
 export default function BrowseView() {
@@ -179,6 +211,46 @@ export default function BrowseView() {
     [showToast]
   );
 
+  const requestArtist = useCallback(
+    async (artist: DiscoverArtist) => {
+      const key = keyOf("artist", artist.mbid);
+      setOverrides((o) => ({ ...o, [key]: { ...o[key], busy: true } }));
+      try {
+        const res = await fetch("/api/requests", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type: "artist",
+            mbid: artist.mbid,
+            title: artist.title,
+            artist: artist.title,
+            artistMbid: artist.mbid,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error ?? "request failed");
+
+        setOverrides((o) => ({
+          ...o,
+          [key]: {
+            busy: false,
+            requestId: data.request?.id,
+            requestStatus: data.request?.status,
+          },
+        }));
+        showToast(
+          data.duplicate
+            ? `“${artist.title}” is already requested.`
+            : `Requested “${artist.title}” — Lidarr is searching for it now.`
+        );
+      } catch (err) {
+        setOverrides((o) => ({ ...o, [key]: { ...o[key], busy: false } }));
+        showToast(err instanceof Error ? err.message : "request failed", "error");
+      }
+    },
+    [showToast]
+  );
+
   const openLibrary = useCallback((album: LibraryAlbum) => {
     setDetail({
       type: "album",
@@ -241,6 +313,9 @@ export default function BrowseView() {
           Browse the albums Jellyfin already holds, then request the ones that are missing. Lidarr
           gets first crack; yt-dlp fills the gaps.
         </p>
+        <div className="mt-5">
+          <SearchView embedded />
+        </div>
         {(library || discover) && (
           <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-white/45">
             {library && <span>{library.total} albums in your library</span>}
@@ -292,19 +367,26 @@ export default function BrowseView() {
               body="Once Jellyfin has albums, they will show up here as a grid."
             />
           ) : (
-            <ul className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
-              {library.albums.map((album) => (
-                <li key={album.id}>
-                  <AlbumTile
-                    title={album.title}
-                    artist={album.artist}
-                    year={album.year}
-                    coverSrc={album.hasArt ? album.coverUrl : undefined}
-                    onOpen={() => openLibrary(album)}
-                  />
-                </li>
-              ))}
-            </ul>
+            <>
+              <ul className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+                {library.albums.slice(0, LIBRARY_LIMIT).map((album) => (
+                  <li key={album.id}>
+                    <AlbumTile
+                      title={album.title}
+                      artist={album.artist}
+                      year={album.year}
+                      coverSrc={album.hasArt ? album.coverUrl : undefined}
+                      onOpen={() => openLibrary(album)}
+                    />
+                  </li>
+                ))}
+              </ul>
+              {library.albums.length > LIBRARY_LIMIT && (
+                <p className="mt-5 text-sm text-white/45">
+                  Showing the first {LIBRARY_LIMIT} of your library — use search to find the rest.
+                </p>
+              )}
+            </>
           )}
         </section>
       )}
@@ -374,15 +456,74 @@ export default function BrowseView() {
         </section>
       )}
 
-      <section className="mt-12">
-        <header className="mb-4">
-          <h2 className="text-lg font-semibold tracking-tight">Search MusicBrainz</h2>
-          <p className="mt-0.5 text-sm text-white/45">
-            Looking for something specific? Search and request it directly.
-          </p>
-        </header>
-        <SearchView embedded />
-      </section>
+      {!needsSetup && (
+        <section className="mt-12">
+          <header className="mb-4">
+            <h2 className="text-lg font-semibold tracking-tight">New artists</h2>
+            <p className="mt-0.5 text-sm text-white/45">
+              {discover?.basedOn && discover.basedOn.length > 0
+                ? `Because you listen to ${joinGenres(discover.basedOn)} — one tap to request.`
+                : "Artists outside your library you might like — one tap to request."}
+            </p>
+          </header>
+
+          {!discover ? (
+            <ShelfSkeleton count={6} />
+          ) : (discover.newArtists ?? []).length === 0 ? (
+            <EmptyState
+              title="No new artists yet"
+              body="Add a few albums to your library and we will suggest artists you do not own."
+            />
+          ) : (
+            <ul className="flex snap-x gap-4 overflow-x-auto pb-2 scrollbar-none">
+              {(discover.newArtists ?? []).map((item) => {
+                const artist = item.artist;
+                const key = keyOf(artist.type, artist.mbid);
+                const ov = overrides[key];
+                const requestId = ov?.requestId ?? item.requestId;
+                const requestStatus = ov?.requestStatus ?? item.requestStatus;
+                const busy = Boolean(ov?.busy);
+                return (
+                  <li key={artist.mbid} className="w-40 shrink-0 snap-start sm:w-44">
+                    <div className="relative aspect-square w-full overflow-hidden rounded-xl ring-1 ring-white/5">
+                      <AlbumCover alt={artist.title} rounded="" className="h-full w-full" />
+                      {requestId && (
+                        <span className="absolute left-2 top-2 flex flex-wrap gap-1">
+                          {requestStatus ? (
+                            <StatusBadge status={requestStatus} />
+                          ) : (
+                            <span className="rounded-full bg-ink-950/70 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-accent-soft ring-1 ring-inset ring-accent/30 backdrop-blur">
+                              Requested
+                            </span>
+                          )}
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-2.5 min-w-0">
+                      <p className="truncate text-sm font-medium text-white/90">{artist.title}</p>
+                      <p className="mt-0.5 truncate text-xs text-white/45">
+                        {artist.subtitle || "Artist"}
+                      </p>
+                    </div>
+                    <p className="mt-1 line-clamp-2 text-xs leading-snug text-white/40">
+                      {item.reason}
+                    </p>
+                    <button
+                      type="button"
+                      disabled={busy || Boolean(requestId)}
+                      onClick={() => void requestArtist(artist)}
+                      aria-label={`Request ${artist.title}`}
+                      className="mt-2 w-full rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white transition hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 focus-visible:ring-offset-2 focus-visible:ring-offset-ink-950 disabled:cursor-not-allowed disabled:bg-ink-700 disabled:text-white/40 motion-reduce:transition-none"
+                    >
+                      {requestId ? "Requested" : busy ? "Requesting…" : "Request"}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+      )}
 
       {detail && (
         <AlbumDetailModal

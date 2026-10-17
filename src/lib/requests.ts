@@ -436,6 +436,8 @@ interface AlbumFallbackSources {
   sources: string[];
   /** True when the sources were generated per track (so reject "Full Album"). */
   rejectFullAlbum: boolean;
+  /** Album identity to stamp on each downloaded track. */
+  album?: { title: string; artist: string };
 }
 
 /**
@@ -487,7 +489,13 @@ async function albumFallbackSources(
   }
   if (sources.length === 0) return single;
 
-  return { sources, rejectFullAlbum: true };
+  return {
+    sources,
+    rejectFullAlbum: true,
+    // Stamp the album on every track so an importer files them as one record
+    // instead of one single-track "album" per file.
+    album: { title: request.albumTitle ?? request.title, artist: request.artist || "" },
+  };
 }
 
 export async function startFallback(requestId: number, reason: string): Promise<void> {
@@ -537,6 +545,7 @@ export async function startFallback(requestId: number, reason: string): Promise<
   enqueueFallback(db.getRequest(requestId)!, {
     sources: album.sources,
     rejectFullAlbum: album.rejectFullAlbum,
+    album: album.album,
   });
   invalidateSuggestions();
 }

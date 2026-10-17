@@ -124,6 +124,11 @@ export function isUserSuppliedSource(request: MediaRequest): boolean {
  */
 export interface YtdlpArgOptions {
   /**
+   * Album identity to stamp on every downloaded file, so an importer can file a
+   * multi-track album download as one album.
+   */
+  album?: { title: string; artist: string };
+  /**
    * Reject a single upload whose title says "full album". Set only when the
    * searches were generated for us (an album fallback split into per-track
    * searches); a user who pastes a full-album URL means it, so their source is
@@ -177,6 +182,18 @@ export function buildYtdlpArgs(sources: string[], opts: YtdlpArgOptions = {}): s
     // and makes yt-dlp reject the filter outright.)
     args.push("--match-filter", 'title !~= "(?i)full album"');
   }
+
+  // Album downloads are separate searches, one per track, so nothing ties them
+  // together as a record. Stamping the album and its artist onto each file is
+  // what lets an importer file them as one album rather than one single-track
+  // "album" per file. The value is a literal, so a colon in it would be read as
+  // the FROM:TO separator — hence metaLiteral().
+  if (opts.album) {
+    const title = metaLiteral(opts.album.title);
+    const artist = metaLiteral(opts.album.artist);
+    if (title) args.push("--parse-metadata", `${title}:meta_album`);
+    if (artist) args.push("--parse-metadata", `${artist}:meta_albumartist`);
+  }
   args.push(...y.extraArgs);
   // Last: the user-controlled values, so nothing can consume one as an option.
   args.push(...sources);
@@ -219,7 +236,7 @@ export { toHostPath } from "./spool";
 
 export function runYtdlp(
   sources: string[],
-  opts: { onOutput?: (line: string) => void; rejectFullAlbum?: boolean } = {}
+  opts: { onOutput?: (line: string) => void; rejectFullAlbum?: boolean; album?: { title: string; artist: string } } = {}
 ): Promise<RunOutcome> {
   const driver = config().ytdlp.driver;
   if (driver === "none") {
@@ -244,7 +261,7 @@ export function runYtdlp(
     return Promise.resolve({ ok: false, skipped: false, files: [], error: `invalid source: ${check.reason}` });
   }
 
-  const { cmd, args } = commandFor(check.sources, { rejectFullAlbum: opts.rejectFullAlbum });
+  const { cmd, args } = commandFor(check.sources, { rejectFullAlbum: opts.rejectFullAlbum, album: opts.album });
 
   return new Promise<RunOutcome>((resolve) => {
     const files: string[] = [];
@@ -332,6 +349,18 @@ const MAX_CONCURRENT = 1;
 export interface FallbackJob {
   sources?: string[];
   rejectFullAlbum?: boolean;
+  /** Album identity to stamp on every file in the job. */
+  album?: { title: string; artist: string };
+}
+
+/** Safe as a literal in `--parse-metadata FROM:TO` (colons separate FROM/TO). */
+function metaLiteral(value: string): string {
+  return value
+    .replace(/[\r\n\t]/g, " ")
+    .replace(/:/g, " - ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 200);
 }
 
 export function queueDepth(): { jobsRunning: number; jobsQueued: number } {
@@ -381,7 +410,7 @@ function startQueuedJob(request: MediaRequest, job: FallbackJob = {}): void {
 
   const result = spool.writeJob(
     request.id,
-    buildYtdlpArgs(check.sources, { rejectFullAlbum: job.rejectFullAlbum })
+    buildYtdlpArgs(check.sources, { rejectFullAlbum: job.rejectFullAlbum, album: job.album })
   );
   if (!result.ok) {
     updateRequest(request.id, {
@@ -453,6 +482,7 @@ export async function runFallback(request: MediaRequest, job: FallbackJob = {}):
 
   const outcome = await runYtdlp(check.sources, {
     rejectFullAlbum: job.rejectFullAlbum,
+    album: job.album,
     onOutput: (line) => {
       if (/^\[download\]\s+\d|\bDestination:/.test(line)) {
         updateRequest(request.id, { statusDetail: line.slice(0, 300) });

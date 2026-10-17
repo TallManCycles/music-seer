@@ -241,7 +241,11 @@ export async function findInLibrary(request: {
     if (item.Type !== type) continue;
 
     if (request.type === "artist") {
-      if (namesMatch(item.Name, request.artist)) {
+      // An artist request carries the artist's name in the title when it has no
+      // separate artist field, so matching against `artist` alone can never
+      // succeed for those.
+      const wanted = request.artist || request.title;
+      if (namesMatch(item.Name, wanted)) {
         return { found: true, detail: `in Jellyfin: artist "${item.Name}"`, item };
       }
       continue;

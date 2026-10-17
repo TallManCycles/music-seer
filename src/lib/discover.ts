@@ -1,4 +1,5 @@
 import { config } from "./config";
+import { localCharts, type LocalChart } from "./charts";
 import * as db from "./db";
 import * as jellyfin from "./jellyfin";
 import {
@@ -61,6 +62,8 @@ export interface DiscoverResult {
   charts: ChartSuggestion[];
   /** Why the chart is missing, when it is. */
   chartsError?: string;
+  /** Regional album chart (Apple), keyed by country. */
+  localChart: LocalChart;
   /** The genres the suggestions were drawn from. */
   basedOn: string[];
 }
@@ -80,6 +83,8 @@ const GENRES_FOR_DISCOVERY = 2;
 const NEW_ARTIST_LIMIT = 20;
 const NEW_RELEASE_LIMIT = 20;
 const CHART_LIMIT = 30;
+/** Regional chart entries to show. */
+const LOCAL_CHART_LIMIT = 25;
 /** ListenBrainz returns 25 by default; it will give up to 100. */
 const CHART_FETCH = 50;
 /**
@@ -91,7 +96,13 @@ const CHART_FETCH = 50;
 const CHART_TTL_MS = 5 * 60 * 1000;
 const CACHE_TTL_MS = 30 * 60 * 1000;
 
-let cache: { at: number; value: DiscoverResult; ownedNames: string[] } | null = null;
+let cache: {
+  at: number;
+  value: DiscoverResult;
+  ownedNames: string[];
+  ownedKeys: string[];
+  requested: Array<[string, { id: number; status: string }]>;
+} | null = null;
 let chartCache: { at: number; charts: ChartSuggestion[] } | null = null;
 
 /** Called when credentials change so a new library is not served stale advice. */
@@ -281,15 +292,24 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
       newArtists: [],
       newReleases: [],
       charts: [],
+      localChart: { region: "", regionName: "", entries: [] },
       basedOn: [],
     };
   }
   if (cache && Date.now() - cache.at < CACHE_TTL_MS) {
     // The MusicBrainz work is what costs 20-odd seconds, so that is what gets
-    // cached. Charts are one cheap request and change hourly, so they are
-    // fetched fresh every time — which also means a blip cannot get baked into
-    // the cache for half an hour (it did, once).
-    return { ...cache.value, charts: (await chartSuggestions(new Set(cache.ownedNames), CHART_LIMIT)).charts };
+    // cached. Both charts are one cheap request each and change hourly, so they
+    // are fetched fresh every time — which also means a blip cannot get baked
+    // into the cache for half an hour (it did, once, for the global chart).
+    const [charts, localChart] = await Promise.all([
+      chartSuggestions(new Set(cache.ownedNames), CHART_LIMIT),
+      localCharts(
+        LOCAL_CHART_LIMIT,
+        (artist, title) => cache!.ownedKeys.includes(albumKey(artist, title)),
+        new Map(cache.requested)
+      ),
+    ]);
+    return { ...cache.value, charts: charts.charts, chartsError: charts.error, localChart };
   }
 
   const albums = await jellyfin.listAlbums({ limit: 1000 });
@@ -452,6 +472,11 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
       }),
     charts: chartResult.charts,
     chartsError: chartResult.error,
+    localChart: await localCharts(
+      LOCAL_CHART_LIMIT,
+      (artist, title) => keys.has(albumKey(artist, title)),
+      requested
+    ),
     basedOn: topGenres,
   };
   if (out.length === 0 && unresolved > 0 && unresolved === candidates.length) {
@@ -462,7 +487,13 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
   }
   // Only cache a result that is not simply "MusicBrainz was down".
   if (!(failures > 0 && failures === candidates.length && out.length === 0)) {
-    cache = { at: Date.now(), value, ownedNames: [...ownedNames] };
+    cache = {
+    at: Date.now(),
+    value,
+    ownedNames: [...ownedNames],
+    ownedKeys: [...keys],
+    requested: [...requested.entries()].map(([k, v]) => [k, { id: v.id, status: v.status }]),
+  };
   } else {
     value.error = "Could not reach MusicBrainz to build suggestions";
   }

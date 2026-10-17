@@ -6,7 +6,8 @@ import * as lidarr from "./lidarr";
 import { jellyfinReady, lidarrReady } from "./settings";
 import { enqueueFallback, pollFallback, resolveSource } from "./ytdlp";
 import * as spool from "./spool";
-import { releaseGroupForRecording, releaseGroupForRelease } from "./musicbrainz";
+import { isMusicBrainzId } from "./charts";
+import { releaseGroupForRecording, releaseGroupForRelease, findReleaseGroupByName } from "./musicbrainz";
 import type { CreateRequestBody, MediaRequest, MediaType, RequestStatus } from "./types";
 
 // --- status helpers --------------------------------------------------------
@@ -48,13 +49,29 @@ export async function createRequest(body: CreateRequestBody): Promise<CreateOutc
 
   // Chart entries arrive keyed by release, and Lidarr keys albums on the release
   // group — so resolve it rather than failing the request with "no release group".
+  let unresolvedChartEntry = false;
   if (type === "album" && !releaseGroupMbid) {
     try {
-      const resolved = await releaseGroupForRelease(mbid);
-      if (resolved) {
-        releaseGroupMbid = resolved.releaseGroupMbid;
-        albumTitle = albumTitle ?? resolved.title;
-        artist = artist || resolved.artist || "";
+      if (isMusicBrainzId(mbid)) {
+        const resolved = await releaseGroupForRelease(mbid);
+        if (resolved) {
+          releaseGroupMbid = resolved.releaseGroupMbid;
+          albumTitle = albumTitle ?? resolved.title;
+          artist = artist || resolved.artist || "";
+        }
+      } else {
+        // A regional chart entry: Apple gives no MusicBrainz ids, so the release
+        // group has to be found by name. Reported after the row exists, so the
+        // failure lands in the request log rather than in a stack trace.
+        const resolved = await findReleaseGroupByName(artist || body.artist, body.title);
+        if (resolved) {
+          releaseGroupMbid = resolved.releaseGroupMbid;
+          albumTitle = albumTitle ?? resolved.title;
+          artist = artist || resolved.artist;
+          artistMbid = artistMbid ?? resolved.artistMbid;
+        } else {
+          unresolvedChartEntry = true;
+        }
       }
     } catch {
       // Falls through to the existing "no release group known" error.
@@ -119,6 +136,22 @@ export async function createRequest(body: CreateRequestBody): Promise<CreateOutc
       lastError: null,
     });
     db.addEvent(request.id, "info", `Already in the library — ${inLibrary.detail}`);
+    return { request: db.getRequest(request.id)!, duplicate: false };
+  }
+
+  // A chart entry that could not be matched on MusicBrainz cannot be handed to
+  // Lidarr at all, so fail it with the reason instead of a stack trace.
+  if (unresolvedChartEntry) {
+    db.updateRequest(request.id, {
+      status: "failed",
+      statusDetail: "Not on MusicBrainz",
+      lastError: `Could not match "${body.title}" by ${body.artist || "that artist"} on MusicBrainz, so Lidarr cannot be asked for it.`,
+    });
+    db.addEvent(
+      request.id,
+      "error",
+      `Could not match "${body.title}" on MusicBrainz — nothing was sent to Lidarr`
+    );
     return { request: db.getRequest(request.id)!, duplicate: false };
   }
 

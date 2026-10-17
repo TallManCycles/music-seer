@@ -64,6 +64,25 @@ interface ChartEntry {
   requestStatus?: RequestStatus;
 }
 
+/** One album in a regional (Apple Music) chart. */
+interface LocalChartEntry {
+  album: DiscoverAlbum;
+  /** Apple's chart position, 1-based. */
+  rank: number;
+  requestId?: number;
+  requestStatus?: RequestStatus;
+}
+
+/** A regional album chart from Apple's public marketing feed. */
+interface LocalChart {
+  region: string;
+  regionName: string;
+  updated?: string;
+  entries: LocalChartEntry[];
+  /** Set when the third-party feed could not be read. */
+  error?: string;
+}
+
 interface DiscoverPayload {
   configured: boolean;
   libraryAlbums: number;
@@ -75,6 +94,8 @@ interface DiscoverPayload {
   newReleases?: NewRelease[];
   /** Globally popular releases from ListenBrainz. */
   charts?: ChartEntry[];
+  /** Regional album chart for the configured country. */
+  localChart?: LocalChart;
   /** The genres the suggestions came from, e.g. ["rock", "pop rock"]. */
   basedOn?: string[];
   error?: string;
@@ -96,11 +117,24 @@ const keyOf = (type: string, mbid: string) => `${type}:${mbid}`;
  * by release and albums by release group, and building it here got that wrong
  * for charts (a guaranteed 404). Fall back to the release-group form only if the
  * API did not supply one.
+ *
+ * Regional (Apple) chart entries are keyed by an opaque `chart:…` id that the
+ * Cover Art Archive proxy cannot resolve, so they have no fallback URL: a
+ * missing cover falls through to the initials tile instead of a 404.
  */
-function suggestionCover(album: DiscoverAlbum): string {
+function suggestionCover(album: DiscoverAlbum): string | undefined {
   if (album.coverUrl) return album.coverUrl;
+  if (album.mbid.startsWith("chart:")) return undefined;
   const mbid = album.releaseGroupMbid ?? album.mbid;
   return `/api/cover?mbid=${mbid}&size=300`;
+}
+
+/** One album as a shelf carries it: why it is here, and any request state. */
+interface ShelfEntry {
+  album: DiscoverAlbum;
+  reason?: string;
+  requestId?: number;
+  requestStatus?: RequestStatus;
 }
 
 /** "rock and pop rock" from ["rock", "pop rock"]. */
@@ -237,7 +271,7 @@ export default function BrowseView() {
   );
 
   const openSuggestion = useCallback(
-    (s: Suggestion) => {
+    (s: ShelfEntry) => {
       const album = s.album;
       const ov = overrides[keyOf(album.type, album.mbid)];
       setDetail({
@@ -260,6 +294,11 @@ export default function BrowseView() {
   );
 
   const needsSetup = discover?.configured === false;
+
+  // A third-party feed: show nothing at all when it is empty or failed.
+  const localChart = discover?.localChart;
+  const showLocalChart =
+    !needsSetup && !localChart?.error && (!discover || (localChart?.entries.length ?? 0) > 0);
 
   const detailKey = detail ? keyOf(detail.type, detail.mbid) : null;
   const detailBusy = detailKey ? overrides[detailKey]?.busy : false;
@@ -547,6 +586,70 @@ export default function BrowseView() {
                     <p className="mt-2 line-clamp-2 text-xs leading-snug text-white/40">
                       {item.reason}
                     </p>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+      )}
+
+      {showLocalChart && (
+        <section className="mt-12">
+          <header className="mb-4">
+            <h2 className="text-lg font-semibold tracking-tight">
+              Charts in {localChart?.regionName}
+            </h2>
+            <p className="mt-0.5 text-sm text-white/45">
+              What {localChart?.regionName} is listening to on Apple Music this week — not based on
+              your library.
+            </p>
+          </header>
+
+          {!discover ? (
+            <ShelfSkeleton count={6} />
+          ) : (
+            <ul className="scrollbar-none -mx-4 flex snap-x gap-4 overflow-x-auto overscroll-x-contain scroll-px-4 px-4 pb-2 sm:-mx-5 sm:scroll-px-5 sm:px-5">
+              {(localChart?.entries ?? []).map((item) => {
+                const album = item.album;
+                const ov = overrides[keyOf(album.type, album.mbid)];
+                const requestId = ov?.requestId ?? item.requestId;
+                const requestStatus = ov?.requestStatus ?? item.requestStatus;
+                return (
+                  <li key={album.mbid} className="w-40 shrink-0 snap-start sm:w-44">
+                    <AlbumTile
+                      title={album.title}
+                      artist={album.artist}
+                      year={album.year}
+                      coverSrc={suggestionCover(album)}
+                      onOpen={() => openSuggestion(item)}
+                      onQuickRequest={
+                        requestId ? undefined : () => void requestAlbum({ ...album, coverSrc: suggestionCover(album) })
+                      }
+                      quickBusy={Boolean(ov?.busy)}
+                      quickDone={Boolean(requestId)}
+                      badge={
+                        <>
+                          <span className="rounded-full bg-ink-950/70 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-accent-soft ring-1 ring-inset ring-accent/30 backdrop-blur">
+                            #{item.rank}
+                          </span>
+                          {requestId ? (
+                            requestStatus ? (
+                              <StatusBadge status={requestStatus} />
+                            ) : (
+                              <span className="rounded-full bg-ink-950/70 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-accent-soft ring-1 ring-inset ring-accent/30 backdrop-blur">
+                                Requested
+                              </span>
+                            )
+                          ) : null}
+                        </>
+                      }
+                    />
+                    {album.subtitle && (
+                      <p className="mt-2 line-clamp-2 text-xs leading-snug text-white/40">
+                        {album.subtitle}
+                      </p>
+                    )}
                   </li>
                 );
               })}

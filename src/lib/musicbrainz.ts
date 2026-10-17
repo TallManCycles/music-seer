@@ -157,6 +157,52 @@ export function coverArtUrlForRelease(releaseMbid: string | undefined, size = 25
 }
 
 /**
+ * Resolve an album by name. Regional charts (Apple) carry no MusicBrainz ids, so
+ * a chart entry can only be requested after this lookup.
+ *
+ * Strict on purpose: the first query demands an exact release-group title and
+ * artist. If that misses — charts like to append subtitles, "…: The Encore" —
+ * it retries without the subtitle, and otherwise gives up rather than guessing,
+ * because binding a request to the wrong release is worse than failing.
+ */
+export async function findReleaseGroupByName(
+  artist: string,
+  album: string
+): Promise<{ releaseGroupMbid: string; title: string; artist: string; artistMbid?: string } | null> {
+  const norm = (s: string) =>
+    s
+      .toLowerCase()
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+
+  const artistTerm = artist.replace(/"/g, "").replace(/ & /g, " ").trim();
+  const base = album.replace(/"/g, "").trim();
+  const withoutSubtitle = base.split(/\s*[:\u2013\u2014]\s+/)[0].trim();
+  const titles = withoutSubtitle && withoutSubtitle !== base ? [base, withoutSubtitle] : [base];
+
+  for (const title of titles) {
+    const data = await mbFetch<{ "release-groups": MBReleaseGroup[] }>("release-group", {
+      query: `releasegroup:"${title}" AND artist:"${artistTerm}"`,
+      limit: "3",
+      inc: "artist-credits",
+      fmt: "json",
+    });
+    const hit = (data["release-groups"] ?? []).find((rg) => norm(rg.title) === norm(title));
+    if (hit) {
+      return {
+        releaseGroupMbid: hit.id,
+        title: hit.title,
+        artist: creditName(hit["artist-credit"]) || artist,
+        artistMbid: firstArtistMbid(hit["artist-credit"]),
+      };
+    }
+  }
+  return null;
+}
+
+/**
  * The release group a release belongs to. Chart data is keyed by release, but
  * Lidarr keys albums on the release group — so a chart item has to be resolved
  * before it can be requested.

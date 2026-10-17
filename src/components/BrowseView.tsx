@@ -91,7 +91,14 @@ interface Override {
 
 const keyOf = (type: string, mbid: string) => `${type}:${mbid}`;
 
+/**
+ * Cover art for a suggestion. The API returns a finished URL — charts are keyed
+ * by release and albums by release group, and building it here got that wrong
+ * for charts (a guaranteed 404). Fall back to the release-group form only if the
+ * API did not supply one.
+ */
 function suggestionCover(album: DiscoverAlbum): string {
+  if (album.coverUrl) return album.coverUrl;
   const mbid = album.releaseGroupMbid ?? album.mbid;
   return `/api/cover?mbid=${mbid}&size=300`;
 }

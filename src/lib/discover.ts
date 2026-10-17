@@ -3,7 +3,6 @@ import * as db from "./db";
 import * as jellyfin from "./jellyfin";
 import {
   artistsByGenre,
-  coverArtUrlForRelease,
   releaseGroupsForArtist,
   search as mbSearch,
 } from "./musicbrainz";
@@ -66,7 +65,7 @@ export interface DiscoverResult {
   basedOn: string[];
 }
 
-const MAX_ARTISTS = 8;
+const MAX_ARTISTS = 12;
 /**
  * How many of the biggest collections to consider. The shelf browses a rotating
  * window of these rather than the same few every time: with a library of
@@ -78,12 +77,22 @@ const POOL_SIZE = 60;
 const ALBUMS_PER_ARTIST = 25;
 /** How many of the library's top genres to look for new artists in. */
 const GENRES_FOR_DISCOVERY = 2;
-const NEW_ARTIST_LIMIT = 8;
-const NEW_RELEASE_LIMIT = 8;
-const CHART_LIMIT = 12;
+const NEW_ARTIST_LIMIT = 20;
+const NEW_RELEASE_LIMIT = 20;
+const CHART_LIMIT = 30;
+/** ListenBrainz returns 25 by default; it will give up to 100. */
+const CHART_FETCH = 50;
+/**
+ * Charts change hourly, so a few minutes of cache is plenty. This is about
+ * resilience rather than speed: it stops every page load hammering ListenBrainz
+ * (which rate limits), and it means a blip serves the last good chart instead of
+ * an empty shelf.
+ */
+const CHART_TTL_MS = 5 * 60 * 1000;
 const CACHE_TTL_MS = 30 * 60 * 1000;
 
 let cache: { at: number; value: DiscoverResult; ownedNames: string[] } | null = null;
+let chartCache: { at: number; charts: ChartSuggestion[] } | null = null;
 
 /** Called when credentials change so a new library is not served stale advice. */
 export function invalidateSuggestions(): void {
@@ -97,6 +106,16 @@ function artistOf(item: jellyfin.JellyfinItem): string {
 /** Identity of an album for "do we already have it?" purposes. */
 function albumKey(artist: string, title: string): string {
   return `${jellyfin.normalizeName(artist)}|${jellyfin.normalizeName(title)}`;
+}
+
+/**
+ * Cover art through our own proxy, as a ready-to-use URL. The UI used to build
+ * this itself and got it wrong for charts (which are keyed by release, not
+ * release group), so the API hands out the finished URL instead.
+ */
+function proxiedCover(album: SearchResult): string | undefined {
+  const id = album.releaseGroupMbid ?? album.mbid;
+  return id ? `/api/cover?mbid=${encodeURIComponent(id)}&size=300` : undefined;
 }
 
 interface LibraryArtist {
@@ -180,17 +199,24 @@ async function chartSuggestions(
   ownedNames: Set<string>,
   limit: number
 ): Promise<{ charts: ChartSuggestion[]; error?: string }> {
+  if (chartCache && Date.now() - chartCache.at < CHART_TTL_MS) {
+    return { charts: chartCache.charts };
+  }
+
   // One retry: a single blip should not cost the shelf, and this is a cheap
   // request next to the MusicBrainz work.
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const res = await fetch(`${LISTENBRAINZ}/stats/sitewide/releases?range=week`, {
-        headers: { Accept: "application/json", "User-Agent": config().userAgent },
-        signal: AbortSignal.timeout(15_000),
-      });
+      const res = await fetch(
+        `${LISTENBRAINZ}/stats/sitewide/releases?range=week&count=${CHART_FETCH}`,
+        {
+          headers: { Accept: "application/json", "User-Agent": config().userAgent },
+          signal: AbortSignal.timeout(15_000),
+        }
+      );
       if (!res.ok) {
         if (attempt === 0) continue;
-        return { charts: [], error: `ListenBrainz answered ${res.status}` };
+        return staleCharts(`ListenBrainz answered ${res.status}`);
       }
       const body = (await res.json()) as { payload?: { releases?: LbRelease[] } };
 
@@ -214,7 +240,11 @@ async function chartSuggestions(
             title: release.release_name,
             artist: release.artist_name,
             artistMbid: release.artist_mbids?.[0],
-            coverUrl: coverArtUrlForRelease(release.caa_release_mbid),
+            // Charts are keyed by release, so the cover must be asked for as a
+            // release — asking as a release group is a guaranteed 404.
+            coverUrl: `/api/cover?release=${encodeURIComponent(
+              release.caa_release_mbid || release.release_mbid
+            )}&size=300`,
             subtitle: "Chart",
           },
           reason: `${release.listen_count.toLocaleString("en-AU")} listens this week`,
@@ -222,14 +252,23 @@ async function chartSuggestions(
         });
         if (out.length >= limit) break;
       }
+      chartCache = { at: Date.now(), charts: out };
       return { charts: out };
     } catch (err) {
       if (attempt === 1) {
-        return { charts: [], error: err instanceof Error ? err.message : String(err) };
+        return staleCharts(err instanceof Error ? err.message : String(err));
       }
     }
   }
-  return { charts: [] };
+  return staleCharts("no attempt succeeded");
+}
+
+/** The last good chart, or nothing, plus why it is stale. */
+function staleCharts(reason: string): { charts: ChartSuggestion[]; error?: string } {
+  if (chartCache) {
+    return { charts: chartCache.charts, error: `showing the last chart (${reason})` };
+  }
+  return { charts: [], error: reason };
 }
 
 export async function suggestions(limit = 24): Promise<DiscoverResult> {
@@ -304,12 +343,13 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
       return !keys.has(albumKey(credited, album.title)) && !keys.has(albumKey(artist.name, album.title));
     });
 
-    // Albums from this year or last that the library does not have: a release
-    // you have not caught up with yet. The dates arrive with the discography,
-    // so this costs nothing extra.
+    // Albums from the last few years that the library does not have: a release
+    // you have not caught up with yet. The dates arrive with the discography, so
+    // this costs nothing extra — but the count is bounded by what your artists
+    // have actually put out, which is why this shelf is often the shortest.
     for (const album of missing) {
       const year = Number(album.year);
-      if (Number.isFinite(year) && year >= new Date().getFullYear() - 1) {
+      if (Number.isFinite(year) && year >= new Date().getFullYear() - 2) {
         recent.push({ album, artistName: artist.name, year });
       }
     }
@@ -324,7 +364,7 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
         // back to the artist we browsed.
         const credited = { ...album, artist: album.artist || artist.name };
         return {
-          album: credited,
+          album: { ...credited, coverUrl: proxiedCover(credited) },
           reason:
             artist.albums === 1
               ? `You have 1 album by ${artist.name}`
@@ -369,7 +409,9 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
     if (newArtists.length >= NEW_ARTIST_LIMIT) break;
     let found: SearchResult[];
     try {
-      found = await artistsByGenre(genre, 20);
+      // Ask for more than we need: artists already in the library are filtered
+      // out afterwards, and the genre search is only one request either way.
+      found = await artistsByGenre(genre, 40);
     } catch {
       continue;
     }
@@ -402,7 +444,7 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
       .map((entry) => {
         const existing = requested.get(entry.album.mbid);
         return {
-          album: { ...entry.album, artist: entry.album.artist || entry.artistName },
+          album: { ...entry.album, artist: entry.album.artist || entry.artistName, coverUrl: proxiedCover(entry.album) },
           reason: `New in ${entry.year} from ${entry.artistName}`,
           requestId: existing?.id,
           requestStatus: existing?.status,

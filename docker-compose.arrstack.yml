@@ -1,70 +1,84 @@
-# music-seer, joined to an existing arrstack.
+# music-seer — reference an existing arrstack.
 #
-# Use this instead of the plain docker-compose.yml when your stack already runs
-# on the external `local-docker` network (gluetun + the *arr apps).
+# This file only references images; there is no source tree needed on the host.
+# Every folder is a variable, with a default that suits a typical arrstack, so
+# the minimum viable setup is: copy .env.example to .env, fill in the paths, and
 #
-#   docker compose -f docker-compose.arrstack.yml up -d --build
+#   docker compose -f docker-compose.arrstack.yml up -d
 #
-# Why this file exists rather than an override: Lidarr here runs with
-# `network_mode: service:gluetun`, so it has no network identity of its own and
-# no `lidarr` hostname. It is reachable as `gluetun:8686` from inside the
-# network, and only through gluetun from the LAN.
+# Variables are read from ./.env (compose loads it automatically). Nothing here
+# needs to be edited by hand.
 
 services:
   music-seer:
-    build: .
-    image: music-seer:latest
-    container_name: music-seer
+    image: ${MUSICSEER_IMAGE:-ghcr.io/tallmancycles/music-seer:latest}
+    container_name: ${MUSICSEER_CONTAINER_NAME:-music-seer}
     restart: unless-stopped
     ports:
-      - "8666:3000"
-    env_file:
-      - .env
+      - "${MUSICSEER_PORT:-8666}:3000"
     environment:
       PORT: "3000"
       NODE_ENV: production
-      MUSICSEER_DB_PATH: /app/data/musicseer.db
-      MUSICSEER_YTDLP_DRIVER: queue
-      MUSICSEER_SPOOL_PATH: /app/spool
-      # Lidarr shares gluetun's network namespace.
-      MUSICSEER_LIDARR_URL: http://gluetun:8686
-      # The root folder as LIDARR sees it, not the host path.
-      MUSICSEER_LIDARR_ROOT_FOLDER: /music
-      MUSICSEER_JELLYFIN_URL: http://192.168.0.201:8096
-      # Paths as the WORKER sees them — these are what end up in yt-dlp's argv.
-      MUSICSEER_INBOX_CONTAINER_PATH: /inbox
-      MUSICSEER_YTDLP_CONFIG_CONTAINER_PATH: /config
-    volumes:
-      - ./data:/app/data
-      - ./spool:/app/spool
-    networks:
-      - local-docker
-    # The app itself runs as a non-root user and holds no docker socket: it can
-    # write a job file, and nothing more.
 
-  # Runs the actual downloads. Deliberately NOT behind gluetun by default:
-  # it needs to reach this NAS and Lidarr, and it is not a torrent client. Add
-  # `network_mode: service:gluetun` (and drop `networks:`) if you would rather
-  # YouTube saw your VPN address.
+      # --- folders INSIDE this container (rarely worth changing) -----------
+      MUSICSEER_DB_PATH: /app/data/musicseer.db
+      MUSICSEER_SPOOL_PATH: /app/spool
+
+      # --- how downloads happen -------------------------------------------
+      MUSICSEER_YTDLP_DRIVER: queue
+      # Shown on the status page, so it reports the worker actually in use.
+      MUSICSEER_YTDLP_IMAGE: ${MUSICSEER_WORKER_IMAGE:-ghcr.io/tallmancycles/music-seer-ytdlp:latest}
+      # These are paths as the WORKER sees them, and they must match its mounts
+      # below — which is why both read the same variable.
+      MUSICSEER_INBOX_CONTAINER_PATH: ${MUSICSEER_INBOX_CONTAINER_PATH:-/inbox}
+      MUSICSEER_YTDLP_CONFIG_CONTAINER_PATH: ${MUSICSEER_YTDLP_CONFIG_CONTAINER_PATH:-/config}
+      # Host-side folder paths, used to show where a download landed.
+      MUSICSEER_INBOX_DIR: ${MUSICSEER_INBOX_DIR:-/mnt/nas/aaron/music-inbox}
+      MUSICSEER_CONFIG_DIR: ${MUSICSEER_CONFIG_DIR:-/mnt/nas/aaron/ytdlp-config}
+
+      # --- integrations ----------------------------------------------------
+      # Lidarr usually shares gluetun's network namespace, so it has no
+      # hostname of its own: http://lidarr:8686 will not resolve.
+      MUSICSEER_LIDARR_URL: ${MUSICSEER_LIDARR_URL:-http://gluetun:8686}
+      # The root folder AS LIDARR SEES IT, not the host path.
+      MUSICSEER_LIDARR_ROOT_FOLDER: ${MUSICSEER_LIDARR_ROOT_FOLDER:-/music}
+      MUSICSEER_JELLYFIN_URL: ${MUSICSEER_JELLYFIN_URL:-}
+      MUSICSEER_JELLYFIN_USER_ID: ${MUSICSEER_JELLYFIN_USER_ID:-}
+
+      # --- policy ----------------------------------------------------------
+      MUSICSEER_FALLBACK_AFTER_MINUTES: ${MUSICSEER_FALLBACK_AFTER_MINUTES:-120}
+      MUSICSEER_POLL_INTERVAL_MINUTES: ${MUSICSEER_POLL_INTERVAL_MINUTES:-5}
+      MUSICSEER_LIDARR_COMPLETE_THRESHOLD: ${MUSICSEER_LIDARR_COMPLETE_THRESHOLD:-1}
+      MUSICSEER_USER_AGENT: ${MUSICSEER_USER_AGENT:-music-seer/0.1}
+      MUSICSEER_NET_FAMILY_AUTOSELECT: ${MUSICSEER_NET_FAMILY_AUTOSELECT:-auto}
+    volumes:
+      - ${MUSICSEER_DATA_DIR:-./data}:/app/data
+      - ${MUSICSEER_SPOOL_DIR:-./spool}:/app/spool
+    networks:
+      - arrstack
+    # No docker socket and a non-root user: the app can write a job file and
+    # nothing more.
+
+  # The only thing that runs downloads. Not behind gluetun by default — it is
+  # not a torrent client and it needs to reach the NAS and Lidarr.
   ytdlp-worker:
-    image: ${MUSICSEER_YTDLP_IMAGE:-jauderho/yt-dlp:latest}
-    container_name: music-seer-ytdlp
+    image: ${MUSICSEER_WORKER_IMAGE:-ghcr.io/tallmancycles/music-seer-ytdlp:latest}
+    container_name: ${MUSICSEER_WORKER_CONTAINER_NAME:-music-seer-ytdlp}
     restart: unless-stopped
-    entrypoint: ["/bin/sh", "/worker/ytdlp-worker.sh"]
+    # Match the rest of the stack so downloads are not root-owned.
+    user: "${PUID:-1000}:${PGID:-1000}"
     environment:
       SPOOL_DIR: /spool
-      INBOX_DIR: /inbox
-      POLL_SECONDS: "5"
+      INBOX_DIR: ${MUSICSEER_INBOX_CONTAINER_PATH:-/inbox}
+      POLL_SECONDS: ${MUSICSEER_WORKER_POLL_SECONDS:-5}
     volumes:
-      - ./spool:/spool
-      # Downloads land here, NOT in the library.
-      - /mnt/nas/aaron/music-inbox:/inbox
-      # Holds the download archive, so nothing is fetched twice.
-      - /mnt/nas/aaron/ytdlp-config:/config
-      - ./scripts/ytdlp-worker.sh:/worker/ytdlp-worker.sh:ro
+      - ${MUSICSEER_SPOOL_DIR:-./spool}:/spool
+      - ${MUSICSEER_INBOX_DIR:-/mnt/nas/aaron/music-inbox}:${MUSICSEER_INBOX_CONTAINER_PATH:-/inbox}
+      - ${MUSICSEER_CONFIG_DIR:-/mnt/nas/aaron/ytdlp-config}:${MUSICSEER_YTDLP_CONFIG_CONTAINER_PATH:-/config}
     networks:
-      - local-docker
+      - arrstack
 
 networks:
-  local-docker:
+  arrstack:
     external: true
+    name: ${MUSICSEER_DOCKER_NETWORK:-local-docker}

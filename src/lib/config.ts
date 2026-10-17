@@ -113,8 +113,14 @@ export function loadConfig(): AppConfig {
         /* turbopackIgnore: true */ cwd,
         process.env.MUSICSEER_SPOOL_PATH ?? "./spool"
       ),
-      inboxHostPath: process.env.MUSICSEER_INBOX_HOST_PATH ?? "/mnt/nas/Aaron/music-inbox",
-      configHostPath: process.env.MUSICSEER_YTDLP_CONFIG_HOST_PATH ?? "/mnt/nas/Aaron/ytdlp-config",
+      inboxHostPath:
+        process.env.MUSICSEER_INBOX_DIR ??
+        process.env.MUSICSEER_INBOX_HOST_PATH ??
+        "/mnt/nas/aaron/music-inbox",
+      configHostPath:
+        process.env.MUSICSEER_CONFIG_DIR ??
+        process.env.MUSICSEER_YTDLP_CONFIG_HOST_PATH ??
+        "/mnt/nas/aaron/ytdlp-config",
       inboxContainerPath: process.env.MUSICSEER_INBOX_CONTAINER_PATH ?? "/inbox",
       configContainerPath: process.env.MUSICSEER_YTDLP_CONFIG_CONTAINER_PATH ?? "/config",
       archive: process.env.MUSICSEER_YTDLP_ARCHIVE ?? "musicseer_archive.txt",

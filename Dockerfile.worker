@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1
+#
+# music-seer — the yt-dlp worker.
+#
+# This is the only thing that runs downloads. It watches a shared spool
+# directory for job files, runs yt-dlp with the argv the app prepared, and
+# reports the result back. It holds no docker socket, no API keys and no
+# database: the app cannot execute anything here beyond "run yt-dlp".
+#
+# Built on the upstream yt-dlp image so yt-dlp itself stays current with it.
+
+FROM jauderho/yt-dlp:latest
+
+COPY scripts/ytdlp-worker.sh /worker/ytdlp-worker.sh
+
+LABEL org.opencontainers.image.title="music-seer-ytdlp" \
+      org.opencontainers.image.description="yt-dlp worker for music-seer" \
+      org.opencontainers.image.source="https://github.com/TallManCycles/music-seer" \
+      org.opencontainers.image.licenses="MIT"
+
+# The worker writes into the inbox, which in an arrstack is owned by the PUID
+# the rest of the stack uses. Run it as that user (set in compose) so downloads
+# do not come out root-owned.
+ENV SPOOL_DIR=/spool \
+    INBOX_DIR=/inbox \
+    POLL_SECONDS=5
+
+ENTRYPOINT ["/bin/sh", "/worker/ytdlp-worker.sh"]

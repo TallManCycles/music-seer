@@ -1,42 +1,60 @@
+# music-seer — build from this checkout.
+#
+# For developing on the app, or for a host that should build rather than pull.
+# Every folder is a variable with a default, so it works as-is:
+#
+#   docker compose up -d --build
+#
+# To run against an existing arrstack (pulling published images and joining its
+# docker network) use docker-compose.arrstack.yml instead.
+
 services:
   music-seer:
-    build: .
-    image: music-seer:latest
-    container_name: music-seer
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${MUSICSEER_IMAGE:-music-seer:latest}
+    container_name: ${MUSICSEER_CONTAINER_NAME:-music-seer}
     restart: unless-stopped
     ports:
-      - "8666:3000"
-    env_file:
-      - .env
+      - "${MUSICSEER_PORT:-8666}:3000"
     environment:
       PORT: "3000"
       NODE_ENV: production
       MUSICSEER_DB_PATH: /app/data/musicseer.db
-      # Default driver: hand jobs to the worker below through the spool.
-      MUSICSEER_YTDLP_DRIVER: queue
       MUSICSEER_SPOOL_PATH: /app/spool
+      MUSICSEER_YTDLP_DRIVER: queue
+      MUSICSEER_YTDLP_IMAGE: ${MUSICSEER_WORKER_IMAGE:-music-seer-ytdlp:latest}
+      MUSICSEER_INBOX_CONTAINER_PATH: ${MUSICSEER_INBOX_CONTAINER_PATH:-/inbox}
+      MUSICSEER_YTDLP_CONFIG_CONTAINER_PATH: ${MUSICSEER_YTDLP_CONFIG_CONTAINER_PATH:-/config}
+      MUSICSEER_INBOX_DIR: ${MUSICSEER_INBOX_DIR:-./inbox}
+      MUSICSEER_CONFIG_DIR: ${MUSICSEER_CONFIG_DIR:-./ytdlp-config}
+      MUSICSEER_LIDARR_URL: ${MUSICSEER_LIDARR_URL:-http://192.168.0.201:8686}
+      MUSICSEER_LIDARR_ROOT_FOLDER: ${MUSICSEER_LIDARR_ROOT_FOLDER:-/music}
+      MUSICSEER_JELLYFIN_URL: ${MUSICSEER_JELLYFIN_URL:-}
+      MUSICSEER_JELLYFIN_USER_ID: ${MUSICSEER_JELLYFIN_USER_ID:-}
+      MUSICSEER_FALLBACK_AFTER_MINUTES: ${MUSICSEER_FALLBACK_AFTER_MINUTES:-120}
+      MUSICSEER_POLL_INTERVAL_MINUTES: ${MUSICSEER_POLL_INTERVAL_MINUTES:-5}
+      MUSICSEER_LIDARR_COMPLETE_THRESHOLD: ${MUSICSEER_LIDARR_COMPLETE_THRESHOLD:-1}
+      MUSICSEER_USER_AGENT: ${MUSICSEER_USER_AGENT:-music-seer/0.1}
+      MUSICSEER_NET_FAMILY_AUTOSELECT: ${MUSICSEER_NET_FAMILY_AUTOSELECT:-auto}
     volumes:
-      - ./data:/app/data
-      - ./spool:/app/spool
-    # No Docker socket, and the app runs as a non-root user: the web app can
-    # write a job file, but it cannot start containers or otherwise reach the
-    # host. Anything it hands to the worker is an argv list for yt-dlp.
-    # Nothing here needs the inbox mounted — only the worker does.
+      - ${MUSICSEER_DATA_DIR:-./data}:/app/data
+      - ${MUSICSEER_SPOOL_DIR:-./spool}:/app/spool
 
-  # Runs the actual downloads. Give it the same inbox and config directory your
-  # standalone yt-dlp container uses.
   ytdlp-worker:
-    image: ${MUSICSEER_YTDLP_IMAGE:-jauderho/yt-dlp:latest}
-    container_name: music-seer-ytdlp
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: ${MUSICSEER_WORKER_IMAGE:-music-seer-ytdlp:latest}
+    container_name: ${MUSICSEER_WORKER_CONTAINER_NAME:-music-seer-ytdlp}
     restart: unless-stopped
-    entrypoint: ["/bin/sh", "/worker/ytdlp-worker.sh"]
+    user: "${PUID:-1000}:${PGID:-1000}"
     environment:
       SPOOL_DIR: /spool
-      INBOX_DIR: /inbox
-      POLL_SECONDS: "5"
+      INBOX_DIR: ${MUSICSEER_INBOX_CONTAINER_PATH:-/inbox}
+      POLL_SECONDS: ${MUSICSEER_WORKER_POLL_SECONDS:-5}
     volumes:
-      - ./spool:/spool
-      # These two are HOST paths. Set them in .env.
-      - ${MUSICSEER_INBOX_HOST_PATH:?set MUSICSEER_INBOX_HOST_PATH in .env}:/inbox
-      - ${MUSICSEER_YTDLP_CONFIG_HOST_PATH:?set MUSICSEER_YTDLP_CONFIG_HOST_PATH in .env}:/config
-      - ./scripts/ytdlp-worker.sh:/worker/ytdlp-worker.sh:ro
+      - ${MUSICSEER_SPOOL_DIR:-./spool}:/spool
+      - ${MUSICSEER_INBOX_DIR:-./inbox}:${MUSICSEER_INBOX_CONTAINER_PATH:-/inbox}
+      - ${MUSICSEER_CONFIG_DIR:-./ytdlp-config}:${MUSICSEER_YTDLP_CONFIG_CONTAINER_PATH:-/config}

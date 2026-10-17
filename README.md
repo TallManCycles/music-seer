@@ -90,28 +90,72 @@ Two things worth understanding before you start:
    them in with Lidarr's import (the *Ask Lidarr to import* button triggers
    `DownloadedAlbumsScan`) or your own tooling.
 
-### Joining an existing arrstack
+## Images
 
-If your *arr apps already run on a shared docker network (typically behind
-gluetun), use the compose file built for that instead:
+Both images are published to GitHub Container Registry by
+[`.github/workflows/publish.yml`](.github/workflows/publish.yml) on every push
+to `main` and every `v*` tag:
 
-```bash
-docker compose -f docker-compose.arrstack.yml up -d --build
+| Image | What it is |
+|---|---|
+| `ghcr.io/tallmancycles/music-seer` | The web app. |
+| `ghcr.io/tallmancycles/music-seer-ytdlp` | The yt-dlp worker — the only thing that runs downloads. |
+
+Multi-arch (`linux/amd64`, `linux/arm64`), tagged `latest`, `<branch>`,
+`sha-<short>` and, for version tags, the version. **Pin a tag rather than
+`:latest`** if you want a deployment that cannot change under you:
+
+```yaml
+image: ghcr.io/tallmancycles/music-seer:sha-abc1234
 ```
 
-It attaches music-seer and the worker to the external `local-docker` network and
-assumes the two things that follow from that setup:
+Build them yourself instead with:
 
-- **Lidarr has no hostname of its own.** With `network_mode: "service:gluetun"`
-  it shares gluetun's network namespace, so it is reachable as
-  `http://gluetun:8686` from inside the network — `http://lidarr:8686` will not
-  resolve. From the LAN it is whatever port gluetun publishes.
-- **Lidarr's root folder is its *container* path**, e.g. `/music`, not the host
-  path it maps to (`/mnt/nas/aaron/music-clean`). `MUSICSEER_LIDARR_ROOT_FOLDER`
-  must be the path Lidarr itself sees.
+```bash
+docker build -t music-seer:local .
+docker build -f Dockerfile.worker -t music-seer-ytdlp:local .
+```
 
-The worker mounts the inbox and the yt-dlp config directory; both must exist on
-the host first:
+The app image deliberately does **not** include yt-dlp — the default `queue`
+driver hands downloads to the worker, which keeps this image small and free of a
+per-architecture binary. Add `--build-arg WITH_YTDLP=1` if you want the `local`
+driver to work inside it.
+
+## Composing it into an existing arrstack
+
+`docker-compose.arrstack.yml` references the published images and joins an
+existing docker network — no source tree needed on the host:
+
+```bash
+mkdir -p /path/to/music-seer && cd /path/to/music-seer
+curl -O https://raw.githubusercontent.com/TallManCycles/music-seer/main/docker-compose.arrstack.yml
+cp .env.example .env && $EDITOR .env      # or copy it from the repo
+docker compose -f docker-compose.arrstack.yml up -d
+```
+
+**Every folder is a variable** with a working default, so nothing in the compose
+file needs editing:
+
+| Variable | Default | What it is |
+|---|---|---|
+| `MUSICSEER_IMAGE` | `ghcr.io/tallmancycles/music-seer:latest` | App image. |
+| `MUSICSEER_WORKER_IMAGE` | `ghcr.io/tallmancycles/music-seer-ytdlp:latest` | Worker image. |
+| `MUSICSEER_PORT` | `8666` | Host port (point the reverse proxy here). |
+| `MUSICSEER_DATA_DIR` | `./data` | The app's SQLite database. |
+| `MUSICSEER_SPOOL_DIR` | `./spool` | Job handoff between app and worker. |
+| `MUSICSEER_INBOX_DIR` | `/mnt/nas/aaron/music-inbox` | Where downloads land. |
+| `MUSICSEER_CONFIG_DIR` | `/mnt/nas/aaron/ytdlp-config` | yt-dlp config + download archive. |
+| `MUSICSEER_INBOX_CONTAINER_PATH` | `/inbox` | Inbox path *inside* the worker. |
+| `MUSICSEER_YTDLP_CONFIG_CONTAINER_PATH` | `/config` | Config path *inside* the worker. |
+| `MUSICSEER_DOCKER_NETWORK` | `local-docker` | Network to join. |
+| `PUID` / `PGID` | `1000` | User the worker runs as. |
+| `MUSICSEER_CONTAINER_NAME` / `MUSICSEER_WORKER_CONTAINER_NAME` | `music-seer` / `music-seer-ytdlp` | Container names. |
+
+The two `*_CONTAINER_PATH` values are used for both the mount *and* the app's
+configuration, so they cannot drift apart.
+
+Create the host folders first (the inbox and config ones are not created for
+you, and a missing bind source silently becomes a root-owned directory):
 
 ```bash
 mkdir -p /mnt/nas/aaron/music-inbox /mnt/nas/aaron/ytdlp-config
@@ -121,6 +165,21 @@ The worker is deliberately **not** behind gluetun by default — it is not a
 torrent client and it needs to reach the NAS and Lidarr. If you would rather
 YouTube saw your VPN address, give it `network_mode: service:gluetun` and drop
 its `networks:` entry.
+
+### Two things that will bite you
+
+1. **Ownership of `data` and `spool`.** The app runs as uid 1000 (`node`) and
+   the worker runs as `PUID:PGID`, so both directories must be writable by that
+   user. Docker creates missing bind-mount directories as `root`, which produces
+   a crash loop that looks like a bug in the app:
+
+   ```bash
+   mkdir -p data spool && sudo chown -R 1000:1000 data spool
+   ```
+
+2. **Lidarr's root folder is its own container path.** In a gluetun setup Lidarr
+   has no hostname of its own either — it answers on `http://gluetun:8686`, not
+   `http://lidarr:8686`.
 
 ### Without Docker
 

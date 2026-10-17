@@ -429,58 +429,64 @@ export async function recheckImport(request: MediaRequest): Promise<void> {
     return;
   }
 
-  const detail = "In the inbox — waiting for Jellyfin to scan it in";
+  const detail = "In the inbox — waiting for the import step to move it into the library";
   if (request.statusDetail !== detail) {
     db.updateRequest(request.id, { statusDetail: detail });
-    db.addEvent(request.id, "info", "Waiting for Jellyfin to pick up the downloaded files");
+    db.addEvent(request.id, "info", "Waiting for the downloaded files to be imported");
   }
 }
 
 /**
- * Nudge the library to pick up completed downloads. Jellyfin is the library of
- * record, so refreshing it is the step that actually matters; the Lidarr scan
- * is kept for setups where the inbox is a folder Lidarr watches itself.
+ * Nudge the things that turn a downloaded file into a library file. Jellyfin is
+ * refreshed because it is the library of record and it is what the app checks;
+ * the Lidarr scan is kept for setups where the inbox is a folder Lidarr watches
+ * itself. Both are attempted, and both outcomes are reported in one place.
  */
 export async function requestImportScan(requestId: number): Promise<MediaRequest | null> {
   const request = db.getRequest(requestId);
   if (!request) return null;
 
+  const done: string[] = [];
+  const failed: string[] = [];
+
   if (jellyfinReady()) {
     try {
       await jellyfin.refreshLibrary();
+      done.push("Jellyfin");
       db.addEvent(requestId, "info", "Asked Jellyfin to rescan its libraries");
-      db.updateRequest(requestId, { statusDetail: "Library rescan requested in Jellyfin" });
     } catch (err) {
-      db.addEvent(
-        requestId,
-        "error",
-        `Jellyfin library refresh failed: ${err instanceof Error ? err.message : String(err)}`
-      );
+      const message = err instanceof Error ? err.message : String(err);
+      failed.push(`Jellyfin: ${message}`);
+      db.addEvent(requestId, "error", `Jellyfin library refresh failed: ${message}`);
     }
   }
 
-  if (!lidarrReady()) {
-    if (!jellyfinReady()) {
-      db.addEvent(
-        requestId,
-        "warn",
-        "Cannot trigger an import scan: neither Jellyfin nor Lidarr is configured"
-      );
+  if (lidarrReady()) {
+    try {
+      await lidarr.triggerImportScan();
+      done.push("Lidarr");
+      db.addEvent(requestId, "info", "Asked Lidarr to scan for completed downloads");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      failed.push(`Lidarr: ${message}`);
+      db.addEvent(requestId, "error", `Lidarr import scan failed: ${message}`);
     }
+  }
+
+  if (done.length === 0 && failed.length === 0) {
+    db.addEvent(
+      requestId,
+      "warn",
+      "Cannot trigger an import scan: neither Jellyfin nor Lidarr is configured"
+    );
     return db.getRequest(requestId);
   }
 
-  try {
-    await lidarr.triggerImportScan();
-    db.addEvent(requestId, "info", "Asked Lidarr to scan for completed downloads");
-    db.updateRequest(requestId, { statusDetail: "Import scan requested in Lidarr" });
-  } catch (err) {
-    db.addEvent(
-      requestId,
-      "error",
-      `Import scan failed: ${err instanceof Error ? err.message : String(err)}`
-    );
-  }
+  db.updateRequest(requestId, {
+    statusDetail: done.length
+      ? `Library rescan requested in ${done.join(" and ")}`
+      : `Rescan failed — ${failed.join("; ")}`,
+  });
   return db.getRequest(requestId);
 }
 

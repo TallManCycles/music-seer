@@ -307,7 +307,7 @@ try {
     forced.body.request?.lastError);
 
   const imp = await post(`/api/requests/${slowId}/import`, {});
-  check("Lidarr import scan can be triggered", imp.code === 200 && /Import scan/.test(imp.body.request?.statusDetail ?? ""),
+  check("a library rescan can be triggered", imp.code === 200 && /rescan/i.test(imp.body.request?.statusDetail ?? ""),
     imp.body.request?.statusDetail);
 
   // 8. cancellation

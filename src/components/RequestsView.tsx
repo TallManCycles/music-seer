@@ -231,13 +231,13 @@ export default function RequestsView({ initialFilter = "active" }: { initialFilt
                 {(r.status === "import_pending" || r.files.length > 0) && (
                   <button
                     disabled={isBusy}
-                    title="Only works if Lidarr already watches this folder (e.g. a download client's output)"
+                    title="Asks Jellyfin to rescan its libraries, and Lidarr too if it is configured. Use this after your importer has moved the files out of the inbox."
                     onClick={() =>
                       call(r.id, () => fetch(`/api/requests/${r.id}/import`, { method: "POST" }))
                     }
                     className="rounded-lg border border-emerald-400/25 bg-emerald-500/10 px-3 py-1.5 text-sm text-emerald-200 transition hover:bg-emerald-500/20 disabled:opacity-40"
                   >
-                    Ask Lidarr to import
+                    Rescan library
                   </button>
                 )}
 

@@ -91,3 +91,17 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # GHCR packages default to private even from a public repository, which
+      # means every host needs a token to pull. Try to make it public so
+      # `docker compose pull` works anonymously. Needs a token with package
+      # write access; if this cannot do it, flip it once in the package
+      # settings (Package settings -> Change visibility) and it stays that way.
+      - name: Make the package public
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X PATCH "user/packages/container/${{ matrix.name }}" -f visibility=public \
+            && echo "package ${{ matrix.name }} is public" \
+            || echo "could not set visibility for ${{ matrix.name }} — set it manually in the package settings"

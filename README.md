@@ -45,6 +45,34 @@ or on your LAN, next to the rest of the *arr stack.
 | **Override** | Any request can be pushed to yt-dlp by hand, with an editable source URL. |
 | **Import** | Files land in an *inbox*, not the library. A library scan in Jellyfin (the *Ask Lidarr to import* button also refreshes Jellyfin) is what turns them into `available`. |
 
+## How a download becomes available
+
+The app never moves files into your library. It downloads into an *inbox*, and
+something else imports from there:
+
+```
+yt-dlp  ──▶  inbox (/mnt/nas/aaron/music-inbox)
+                 │  your importer — e.g. beets, which matches tags and files
+                 ▼
+             library (/mnt/nas/aaron/music-clean)
+                 │  Jellyfin scans it
+                 ▼
+             available  ◀── the app polls Jellyfin and closes the request
+```
+
+Because Jellyfin is the library of record, the request moves to `available` by
+itself as soon as the importer has filed the album and Jellyfin has scanned it —
+no button required. The reconciler polls every
+`MUSICSEER_POLL_INTERVAL_MINUTES` (5 by default), so give the importer time
+between polls if it runs on a schedule.
+
+Until then the request sits in `import_pending` and says so, and **Rescan
+library** asks Jellyfin (and Lidarr, if configured) to look again.
+
+If a download stays in `import_pending` forever, the importer is the thing to
+check — the request page shows the files it produced and the event log shows
+what the app saw.
+
 ## Why "Lidarr has no release" jumps the queue
 
 The fallback window is for *patience*, not for *impossibility*. If Lidarr

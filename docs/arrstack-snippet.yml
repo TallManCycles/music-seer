@@ -23,6 +23,10 @@
 #     path it maps to (/mnt/nas/aaron/music-clean).
 #   * The two *_CONTAINER_PATH values must match the worker's mount targets
 #     below — that is why the same value appears in both places.
+#   * Do NOT also add music-seer's port to gluetun's `ports:` list. That list is
+#     only for services sharing gluetun's network namespace; music-seer
+#     publishes its own port, like jackett and maintainerr do. Listing it in
+#     both places fails the deploy with "port is already allocated".
 
   music-seer:
     image: ghcr.io/tallmancycles/music-seer:latest

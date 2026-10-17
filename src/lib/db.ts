@@ -11,8 +11,29 @@ let db: Database.Database | null = null;
 export function getDb(): Database.Database {
   if (db) return db;
   const file = config().dbPath;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  db = new Database(file);
+  const dir = path.dirname(file);
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    throw new Error(
+      `Cannot create the database directory ${dir}: ${err instanceof Error ? err.message : String(err)}` +
+        (uid !== undefined ? ` — it must be writable by uid ${uid}.` : ".") +
+        " If this is a container, the bind-mounted directory is usually created root-owned by docker: chown it to the user the app runs as (see the README)."
+    );
+  }
+
+  try {
+    db = new Database(file);
+  } catch (err) {
+    throw new Error(
+      `Cannot open the database at ${file}: ${err instanceof Error ? err.message : String(err)}` +
+        (uid !== undefined ? ` (running as uid ${uid}).` : ".") +
+        ` Check that ${dir} exists and is writable — a bind mount that docker created itself is owned by root, and this app does not run as root.`
+    );
+  }
+
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   migrate(db);

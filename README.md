@@ -323,6 +323,9 @@ node scripts/e2e.mjs  # 22 checks against a mock Lidarr — no real Lidarr neede
 npm run probe         # against a running instance
 ```
 
+CI runs the first three on every push before publishing images, so a broken
+build cannot produce a `latest` tag.
+
 `scripts/e2e.mjs` boots a mock Lidarr and the built server, then drives the
 whole lifecycle: add artist/album → reach *available*, refuse duplicates,
 detect a missing file, hand a release-less request to yt-dlp immediately honour

@@ -9,6 +9,13 @@
 
 FROM node:22-slim AS deps
 WORKDIR /app
+# better-sqlite3 is a native module. It uses a prebuilt binary when one is
+# available, but compiles from source when it is not — or when fetching the
+# prebuild fails — and node-gyp needs a toolchain. This stage is discarded, so
+# none of it reaches the published image.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 make g++ \
+ && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json* ./
 # Force IPv4-first DNS. On a dual-stack host with broken IPv6 egress (Docker
 # Desktop on Windows is a common one) the registry resolves to AAAA records

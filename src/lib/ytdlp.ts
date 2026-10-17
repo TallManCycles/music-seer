@@ -99,6 +99,22 @@ export function resolveSource(request: MediaRequest): SourceCheck {
   return validateSource(raw);
 }
 
+/**
+ * Did the user choose this source, or did we generate it?
+ *
+ * This matters more than it looks. `ytdlpSource` used to be written with
+ * whatever the app generated, and a later fallback then read it back as "the
+ * user chose this", which skipped the per-track logic and the full-album guard
+ * — so one generated `… full album` search pinned a request to a single
+ * full-album video forever. A stored value identical to the default for this
+ * request is ours, not theirs.
+ */
+export function isUserSuppliedSource(request: MediaRequest): boolean {
+  const stored = request.ytdlpSource?.trim();
+  if (!stored) return false;
+  return stored !== defaultSourceFor(request.type, request.artist, request.title);
+}
+
 // --- command construction --------------------------------------------------
 
 /**
@@ -382,7 +398,9 @@ function startQueuedJob(request: MediaRequest, job: FallbackJob = {}): void {
     source: "ytdlp",
     status: "downloading",
     statusDetail: `Queued for the yt-dlp worker: ${summary}`,
-    ytdlpSource: check.sources[0],
+    // Only a source the user chose is persisted; storing our own is what caused
+    // a generated search to be mistaken for their choice on the next attempt.
+    ytdlpSource: isUserSuppliedSource(request) ? request.ytdlpSource : null,
     fallbackAt: request.fallbackAt ?? new Date().toISOString(),
     attempts: request.attempts + 1,
     lastError: null,

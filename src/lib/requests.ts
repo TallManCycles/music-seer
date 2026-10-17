@@ -4,7 +4,13 @@ import { invalidateSuggestions } from "./discover";
 import * as jellyfin from "./jellyfin";
 import * as lidarr from "./lidarr";
 import { jellyfinReady, lidarrReady } from "./settings";
-import { enqueueFallback, pollFallback, resolveSource, validateSource } from "./ytdlp";
+import {
+  enqueueFallback,
+  isUserSuppliedSource,
+  pollFallback,
+  resolveSource,
+  validateSource,
+} from "./ytdlp";
 import * as spool from "./spool";
 import { isMusicBrainzId } from "./charts";
 import {
@@ -448,7 +454,10 @@ async function albumFallbackSources(
 ): Promise<AlbumFallbackSources> {
   const single: AlbumFallbackSources = { sources: [fallbackSource], rejectFullAlbum: false };
   if (request.type !== "album") return single;
-  if (request.ytdlpSource) return single; // the user chose this source
+  // Only a source the user actually chose is honoured as-is. One the app
+  // generated (including the old "… full album" form persisted by an earlier
+  // version) must not stop the per-track logic and the full-album guard.
+  if (isUserSuppliedSource(request)) return single;
   if (!request.releaseGroupMbid) return single;
 
   let tracks: AlbumTrack[];
@@ -512,7 +521,9 @@ export async function startFallback(requestId: number, reason: string): Promise<
     statusDetail:
       album.sources.length > 1 ? `yt-dlp: ${summary}` : `Queued for yt-dlp — ${reason}`,
     // A single valid source, not the "9 tracks" summary: this is re-validated.
-    ytdlpSource: album.sources[0] ?? check.source,
+    // Persist it only when it is the user's, so our own generated source is
+    // never mistaken for their choice on a later attempt.
+    ytdlpSource: isUserSuppliedSource(request) ? request.ytdlpSource : null,
     fallbackAt: new Date().toISOString(),
   });
   db.addEvent(

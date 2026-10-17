@@ -4,10 +4,16 @@ import { invalidateSuggestions } from "./discover";
 import * as jellyfin from "./jellyfin";
 import * as lidarr from "./lidarr";
 import { jellyfinReady, lidarrReady } from "./settings";
-import { enqueueFallback, pollFallback, resolveSource } from "./ytdlp";
+import { enqueueFallback, pollFallback, resolveSource, validateSource } from "./ytdlp";
 import * as spool from "./spool";
 import { isMusicBrainzId } from "./charts";
-import { releaseGroupForRecording, releaseGroupForRelease, findReleaseGroupByName } from "./musicbrainz";
+import {
+  releaseGroupForRecording,
+  releaseGroupForRelease,
+  findReleaseGroupByName,
+  tracklistForReleaseGroup,
+  type AlbumTrack,
+} from "./musicbrainz";
 import type { CreateRequestBody, MediaRequest, MediaType, RequestStatus } from "./types";
 
 // --- status helpers --------------------------------------------------------
@@ -417,6 +423,64 @@ export async function reconcile(request: MediaRequest): Promise<void> {
 
 // --- fallback --------------------------------------------------------------
 
+/** Most tracks one fallback job will ask yt-dlp for; a cap on runaway albums. */
+const MAX_ALBUM_TRACK_SOURCES = 30;
+
+interface AlbumFallbackSources {
+  sources: string[];
+  /** True when the sources were generated per track (so reject "Full Album"). */
+  rejectFullAlbum: boolean;
+}
+
+/**
+ * The sources an album fallback should fetch.
+ *
+ * A user-supplied source is theirs and is passed through untouched. Otherwise
+ * the album's tracklist is fetched from MusicBrainz and turned into one
+ * `ytsearch1:` per track, so the fallback downloads the album's tracks rather
+ * than whichever single "Full Album" video ranks first. Anything unexpected — no
+ * release group, no tracklist, a MusicBrainz failure — falls back to the single
+ * search, so this can only improve on the old behaviour.
+ */
+async function albumFallbackSources(
+  request: MediaRequest,
+  fallbackSource: string
+): Promise<AlbumFallbackSources> {
+  const single: AlbumFallbackSources = { sources: [fallbackSource], rejectFullAlbum: false };
+  if (request.type !== "album") return single;
+  if (request.ytdlpSource) return single; // the user chose this source
+  if (!request.releaseGroupMbid) return single;
+
+  let tracks: AlbumTrack[];
+  try {
+    tracks = await tracklistForReleaseGroup(request.releaseGroupMbid);
+  } catch (err) {
+    db.addEvent(
+      request.id,
+      "warn",
+      `Could not fetch the tracklist for "${request.title}" (${
+        err instanceof Error ? err.message : String(err)
+      }) — falling back to a single search`
+    );
+    return single;
+  }
+  if (tracks.length === 0) return single;
+
+  const sources: string[] = [];
+  const seen = new Set<string>();
+  for (const track of tracks.slice(0, MAX_ALBUM_TRACK_SOURCES)) {
+    // Credit a feature to whoever MusicBrainz says performs the track.
+    const artist = track.artist && track.artist !== request.artist ? track.artist : request.artist;
+    const check = validateSource(`ytsearch1:${artist} ${track.title}`);
+    if (!check.ok || seen.has(check.source)) continue;
+    seen.add(check.source);
+    sources.push(check.source);
+  }
+  if (sources.length === 0) return single;
+
+  return { sources, rejectFullAlbum: true };
+}
+
 export async function startFallback(requestId: number, reason: string): Promise<void> {
   const request = db.getRequest(requestId);
   if (!request || isTerminal(request.status)) return;
@@ -435,16 +499,34 @@ export async function startFallback(requestId: number, reason: string): Promise<
     return;
   }
 
+  // An album that fell back on its own becomes one search per track.
+  const album = await albumFallbackSources(request, check.source);
+  const summary =
+    album.sources.length > 1
+      ? `${album.sources.length} tracks from ${request.albumTitle ?? request.title}`
+      : check.source;
+
   db.updateRequest(requestId, {
     source: "ytdlp",
     status: "fallback_queued",
-    statusDetail: `Queued for yt-dlp — ${reason}`,
-    ytdlpSource: check.source,
+    statusDetail:
+      album.sources.length > 1 ? `yt-dlp: ${summary}` : `Queued for yt-dlp — ${reason}`,
+    // A single valid source, not the "9 tracks" summary: this is re-validated.
+    ytdlpSource: album.sources[0] ?? check.source,
     fallbackAt: new Date().toISOString(),
   });
-  db.addEvent(requestId, "info", `Handing off to yt-dlp: ${reason}`);
+  db.addEvent(
+    requestId,
+    "info",
+    album.sources.length > 1
+      ? `Handing off to yt-dlp: ${summary} (${reason})`
+      : `Handing off to yt-dlp: ${reason}`
+  );
 
-  enqueueFallback(db.getRequest(requestId)!);
+  enqueueFallback(db.getRequest(requestId)!, {
+    sources: album.sources,
+    rejectFullAlbum: album.rejectFullAlbum,
+  });
   invalidateSuggestions();
 }
 

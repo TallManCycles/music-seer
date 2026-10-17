@@ -127,6 +127,27 @@ interface MBRecording {
   }>;
 }
 
+interface MBTrack {
+  position?: number;
+  title?: string;
+  /** Track duration in milliseconds, as MusicBrainz reports it. */
+  length?: number;
+  "artist-credit"?: ArtistCredit[];
+}
+
+interface MBMedium {
+  position?: number;
+  format?: string;
+  tracks?: MBTrack[];
+}
+
+/** A release (a specific edition) with its media and tracks expanded. */
+interface MBRelease {
+  id: string;
+  title?: string;
+  media?: MBMedium[];
+}
+
 function creditName(credits: ArtistCredit[] | undefined): string {
   if (!credits?.length) return "";
   return credits
@@ -221,6 +242,67 @@ export async function releaseGroupForRelease(
     title: group.title,
     artist: creditName(group["artist-credit"]),
   };
+}
+
+/** One track of an album, as MusicBrainz lists it. */
+export interface AlbumTrack {
+  position: number;
+  title: string;
+  artist?: string;
+  lengthMs?: number;
+}
+
+/** MusicBrainz will happily return more; this is a safety cap. */
+const MAX_TRACKLIST = 60;
+
+/**
+ * The tracklist of a release group, taken from whichever of its releases lists
+ * the most tracks. This is what lets an album fall back to yt-dlp as one search
+ * per track instead of a single "Full Album" video.
+ *
+ * Returns [] when there are no releases or no tracks rather than throwing;
+ * a transport failure still propagates so the caller can decide to fall back to
+ * a single search.
+ */
+export async function tracklistForReleaseGroup(releaseGroupMbid: string): Promise<AlbumTrack[]> {
+  if (!releaseGroupMbid) return [];
+
+  const data = await mbFetch<{ releases?: MBRelease[] }>("release", {
+    "release-group": releaseGroupMbid,
+    inc: "recordings+artist-credits",
+    limit: "10",
+    fmt: "json",
+  });
+
+  const releases = data.releases ?? [];
+  if (releases.length === 0) return [];
+
+  // Editions differ (bonus tracks, regional pressings); the fullest one is the
+  // best guess at "the album".
+  const countTracks = (release: MBRelease) =>
+    (release.media ?? []).reduce((n, medium) => n + (medium.tracks?.length ?? 0), 0);
+  const best = releases.reduce((a, b) => (countTracks(b) > countTracks(a) ? b : a));
+
+  const tracks: AlbumTrack[] = [];
+  const seen = new Set<string>();
+  for (const medium of best.media ?? []) {
+    for (const track of medium.tracks ?? []) {
+      const title = (track.title ?? "").trim();
+      if (!title) continue;
+      const position = track.position ?? tracks.length + 1;
+      const key = `${position}::${title.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      tracks.push({
+        position,
+        title,
+        artist: creditName(track["artist-credit"]) || undefined,
+        lengthMs: typeof track.length === "number" ? track.length : undefined,
+      });
+      if (tracks.length >= MAX_TRACKLIST) return tracks;
+    }
+  }
+  return tracks;
 }
 
 /**

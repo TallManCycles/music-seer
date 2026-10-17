@@ -18,7 +18,7 @@ export async function GET(req: Request) {
     }
     const cfg = config();
     const [lidarr, jellyfin] = await Promise.all([systemStatus(), jellyfinStatus()]);
-    const sample = commandFor(defaultSourceFor("track", "Daft Punk", "Get Lucky"));
+    const sample = commandFor([defaultSourceFor("track", "Daft Punk", "Get Lucky")]);
     return NextResponse.json({
       ok: true,
       scheduler: schedulerInfo(),

@@ -57,6 +57,28 @@ export function validateSource(raw: unknown): SourceCheck {
   };
 }
 
+export type SourceListCheck = { ok: true; sources: string[] } | { ok: false; reason: string };
+
+/**
+ * Validate a whole argv source list. Every element goes through
+ * `validateSource` exactly as a lone source used to, and invalid elements are
+ * dropped; the job is refused only when nothing usable is left. The album
+ * fallback builds its list from MusicBrainz titles, so one odd track must not
+ * take the rest of the album down with it.
+ */
+export function validateSources(raws: readonly unknown[]): SourceListCheck {
+  if (!Array.isArray(raws) || raws.length === 0) return { ok: false, reason: "no sources given" };
+  const sources: string[] = [];
+  let firstReason = "";
+  for (const raw of raws) {
+    const check = validateSource(raw);
+    if (check.ok) sources.push(check.source);
+    else if (!firstReason) firstReason = check.reason;
+  }
+  if (sources.length === 0) return { ok: false, reason: firstReason || "no valid sources" };
+  return { ok: true, sources };
+}
+
 /**
  * Where yt-dlp should look. Tracks use a YouTube search (accounting for the
  * `ytsearchN:` prefix); albums and playlists are expected to be given as a
@@ -80,11 +102,21 @@ export function resolveSource(request: MediaRequest): SourceCheck {
 // --- command construction --------------------------------------------------
 
 /**
- * argv for yt-dlp. `source` is placed *last* so it can never be read as the
- * value of a preceding option, and the caller is expected to have validated it
- * with `validateSource` first.
+ * argv for yt-dlp. Every source is placed *last* so none of them can ever be
+ * read as the value of a preceding option, and the caller is expected to have
+ * validated them with `validateSource` first.
  */
-export function buildYtdlpArgs(source: string): string[] {
+export interface YtdlpArgOptions {
+  /**
+   * Reject a single upload whose title says "full album". Set only when the
+   * searches were generated for us (an album fallback split into per-track
+   * searches); a user who pastes a full-album URL means it, so their source is
+   * never filtered.
+   */
+  rejectFullAlbum?: boolean;
+}
+
+export function buildYtdlpArgs(sources: string[], opts: YtdlpArgOptions = {}): string[] {
   const y = config().ytdlp;
   const args: string[] = [
     "--download-archive",
@@ -121,12 +153,17 @@ export function buildYtdlpArgs(source: string): string[] {
     "--newline",
   ];
 
-  if (/^ytsearch:/i.test(source)) {
+  if (sources.some((source) => /^ytsearch:/i.test(source))) {
     args.push("--no-playlist");
   }
+  if (opts.rejectFullAlbum) {
+    // yt-dlp's regex operator is `~=`; `!` negates it. (`!~` is not an operator
+    // and makes yt-dlp reject the filter outright.)
+    args.push("--match-filter", 'title !~= "(?i)full album"');
+  }
   args.push(...y.extraArgs);
-  // Last: the user-controlled value, so nothing can consume it as an option.
-  args.push(source);
+  // Last: the user-controlled values, so nothing can consume one as an option.
+  args.push(...sources);
   return args;
 }
 
@@ -148,8 +185,8 @@ function forLocalDriver(args: string[]): string[] {
  * `yt-dlp`; the queue driver just runs it in the worker container instead of
  * inside the app.
  */
-export function commandFor(source: string): { cmd: string; args: string[] } {
-  const args = buildYtdlpArgs(source);
+export function commandFor(sources: string[], opts: YtdlpArgOptions = {}): { cmd: string; args: string[] } {
+  const args = buildYtdlpArgs(sources, opts);
   if (config().ytdlp.driver === "local") {
     return { cmd: "yt-dlp", args: forLocalDriver(args) };
   }
@@ -165,8 +202,8 @@ export { toHostPath } from "./spool";
 // --- local execution -------------------------------------------------------
 
 export function runYtdlp(
-  source: string,
-  opts: { onOutput?: (line: string) => void } = {}
+  sources: string[],
+  opts: { onOutput?: (line: string) => void; rejectFullAlbum?: boolean } = {}
 ): Promise<RunOutcome> {
   const driver = config().ytdlp.driver;
   if (driver === "none") {
@@ -186,12 +223,12 @@ export function runYtdlp(
     });
   }
 
-  const check = validateSource(source);
+  const check = validateSources(sources);
   if (!check.ok) {
     return Promise.resolve({ ok: false, skipped: false, files: [], error: `invalid source: ${check.reason}` });
   }
 
-  const { cmd, args } = commandFor(check.source);
+  const { cmd, args } = commandFor(check.sources, { rejectFullAlbum: opts.rejectFullAlbum });
 
   return new Promise<RunOutcome>((resolve) => {
     const files: string[] = [];
@@ -265,27 +302,57 @@ export function runYtdlp(
 // --- queueing --------------------------------------------------------------
 
 let running = 0;
-const pending: MediaRequest[] = [];
+interface PendingJob {
+  request: MediaRequest;
+  job: FallbackJob;
+}
+const pending: PendingJob[] = [];
 const MAX_CONCURRENT = 1;
+
+/**
+ * What a fallback job should actually fetch. `sources` defaults to the
+ * request's own single source; an album fallback supplies one search per track.
+ */
+export interface FallbackJob {
+  sources?: string[];
+  rejectFullAlbum?: boolean;
+}
 
 export function queueDepth(): { jobsRunning: number; jobsQueued: number } {
   if (config().ytdlp.driver === "queue") return spool.spoolDepth();
   return { jobsRunning: running, jobsQueued: pending.length };
 }
 
-export function enqueueFallback(request: MediaRequest): void {
+export function enqueueFallback(request: MediaRequest, job: FallbackJob = {}): void {
   if (config().ytdlp.driver === "queue") {
-    startQueuedJob(request);
+    startQueuedJob(request, job);
     return;
   }
-  if (pending.some((r) => r.id === request.id)) return;
-  pending.push(request);
+  if (pending.some((entry) => entry.request.id === request.id)) return;
+  pending.push({ request, job });
   void pump();
 }
 
-/** Hand the job to the worker container via the spool directory. */
-function startQueuedJob(request: MediaRequest): void {
+/** The validated source list for a job: explicit ones, else the request's own. */
+function jobSources(request: MediaRequest, job: FallbackJob): SourceListCheck {
+  if (job.sources && job.sources.length > 0) return validateSources(job.sources);
   const check = resolveSource(request);
+  return check.ok ? { ok: true, sources: [check.source] } : { ok: false, reason: check.reason };
+}
+
+/**
+ * Human-readable form of what a job fetches. `request.ytdlpSource` must stay a
+ * single valid source (it is re-validated later), so the track count lives here
+ * and in statusDetail instead.
+ */
+function sourceSummary(request: MediaRequest, sources: string[]): string {
+  if (sources.length <= 1) return sources[0] ?? "";
+  return `${sources.length} tracks from ${request.albumTitle ?? request.title}`;
+}
+
+/** Hand the job to the worker container via the spool directory. */
+function startQueuedJob(request: MediaRequest, job: FallbackJob = {}): void {
+  const check = jobSources(request, job);
   if (!check.ok) {
     updateRequest(request.id, {
       status: "failed",
@@ -296,7 +363,10 @@ function startQueuedJob(request: MediaRequest): void {
     return;
   }
 
-  const result = spool.writeJob(request.id, buildYtdlpArgs(check.source));
+  const result = spool.writeJob(
+    request.id,
+    buildYtdlpArgs(check.sources, { rejectFullAlbum: job.rejectFullAlbum })
+  );
   if (!result.ok) {
     updateRequest(request.id, {
       status: "failed",
@@ -307,25 +377,26 @@ function startQueuedJob(request: MediaRequest): void {
     return;
   }
 
+  const summary = sourceSummary(request, check.sources);
   updateRequest(request.id, {
     source: "ytdlp",
     status: "downloading",
-    statusDetail: `Queued for the yt-dlp worker: ${check.source}`,
-    ytdlpSource: check.source,
+    statusDetail: `Queued for the yt-dlp worker: ${summary}`,
+    ytdlpSource: check.sources[0],
     fallbackAt: request.fallbackAt ?? new Date().toISOString(),
     attempts: request.attempts + 1,
     lastError: null,
   });
-  addEvent(request.id, "info", `yt-dlp job queued for ${check.source}`);
+  addEvent(request.id, "info", `yt-dlp job queued for ${summary}`);
 }
 
 async function pump(): Promise<void> {
   while (running < MAX_CONCURRENT && pending.length > 0) {
-    const req = pending.shift()!;
+    const entry = pending.shift()!;
     running += 1;
     // Never let a rejected job go unhandled: the queue must keep draining.
-    void runFallback(req)
-      .catch((err) => recordFailure(req.id, err))
+    void runFallback(entry.request, entry.job)
+      .catch((err) => recordFailure(entry.request.id, err))
       .finally(() => {
         running -= 1;
         void pump();
@@ -340,8 +411,8 @@ function recordFailure(requestId: number, err: unknown): void {
 }
 
 /** Runs one fallback job in-process (local driver) and records the outcome. */
-export async function runFallback(request: MediaRequest): Promise<RunOutcome> {
-  const check = resolveSource(request);
+export async function runFallback(request: MediaRequest, job: FallbackJob = {}): Promise<RunOutcome> {
+  const check = jobSources(request, job);
   if (!check.ok) {
     updateRequest(request.id, {
       status: "failed",
@@ -352,16 +423,18 @@ export async function runFallback(request: MediaRequest): Promise<RunOutcome> {
     return { ok: false, skipped: false, files: [], error: check.reason };
   }
 
+  const summary = sourceSummary(request, check.sources);
   updateRequest(request.id, {
     source: "ytdlp",
     status: "downloading",
-    statusDetail: `yt-dlp: ${check.source}`,
+    statusDetail: `yt-dlp: ${summary}`,
     fallbackAt: request.fallbackAt ?? new Date().toISOString(),
     attempts: request.attempts + 1,
   });
-  addEvent(request.id, "info", `yt-dlp started for ${check.source}`);
+  addEvent(request.id, "info", `yt-dlp started for ${summary}`);
 
-  const outcome = await runYtdlp(check.source, {
+  const outcome = await runYtdlp(check.sources, {
+    rejectFullAlbum: job.rejectFullAlbum,
     onOutput: (line) => {
       if (/^\[download\]\s+\d|\bDestination:/.test(line)) {
         updateRequest(request.id, { statusDetail: line.slice(0, 300) });

@@ -145,6 +145,15 @@ export function normalizeName(value: string): string {
     .replace(/\s*[\(\[][^)\]]*[)\]]\s*/g, " ")
     .replace(/&/g, " and ")
     .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    // Files imported "as-is" from a video keep the video's title noise, so an
+    // album can land in the library as "Where The Angels Fall Documentary".
+    // Only trailing noise is removed, and only these known phrases, so a real
+    // title is not mangled.
+    .replace(
+      /\s+(full album|documentary|official video|official audio|lyric video|lyrics video|visuali[sz]er|music video|hd|hq)$/i,
+      ""
+    )
     .trim();
 }
 
@@ -212,10 +221,21 @@ export async function findInLibrary(request: {
   albumTitle?: string;
 }): Promise<LibraryLookup> {
   const type = ITEM_TYPES[request.type];
-  const term = [request.artist, request.type === "album" ? request.albumTitle ?? request.title : request.title]
-    .filter(Boolean)
-    .join(" ");
-  const items = await searchItems({ types: [type], term, limit: 25 });
+
+  // Search by TITLE only. Jellyfin's SearchTerm does not combine terms: asking
+  // for "twenty one pilots Blurryface" returns nothing, while "Blurryface"
+  // returns the album. Joining artist and title here (as this used to) meant
+  // every availability check searched for something Jellyfin could never match,
+  // so nothing was ever recognised as available. The artist is still checked
+  // below, locally, where it is strict.
+  const term =
+    request.type === "album"
+      ? request.albumTitle ?? request.title
+      : request.type === "artist"
+        ? request.artist || request.title
+        : request.title;
+
+  const items = await searchItems({ types: [type], term, limit: 50 });
 
   for (const item of items) {
     if (item.Type !== type) continue;

@@ -35,7 +35,9 @@ FROM node:22-slim AS runner
 WORKDIR /app
 
 ARG WITH_YTDLP=0
-ARG YTDLP_VERSION=2026.10.16
+# "latest" rather than a pinned version: this only matters for the opt-in
+# local driver, and a guessed pin would break the build the day it is wrong.
+ARG YTDLP_VERSION=latest
 
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
@@ -53,7 +55,7 @@ RUN apt-get update \
         arm64) YTDLP_BIN=yt-dlp_linux_aarch64 ;; \
         *)     YTDLP_BIN=yt-dlp_linux ;; \
       esac; \
-      curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/${YTDLP_BIN}" \
+      curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/${YTDLP_VERSION}/download/${YTDLP_BIN}" \
         -o /usr/local/bin/yt-dlp; \
       chmod 0755 /usr/local/bin/yt-dlp; \
     fi

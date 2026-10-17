@@ -27,10 +27,22 @@ POLL_SECONDS="${POLL_SECONDS:-5}"
 YTDLP_BIN="${YTDLP_BIN:-yt-dlp}"
 
 log() { echo "[ytdlp-worker] $*"; }
+fail() { echo "[ytdlp-worker] ERROR: $*" >&2; exit 1; }
 
-mkdir -p "$SPOOL_DIR" "$INBOX_DIR"
+# The spool and the inbox are normally bind mounts owned by the host user. If
+# they are not writable this worker cannot do its job at all — and skipping
+# every job in silence is the worst possible outcome, because the queue just
+# grows while nothing downloads. Stop instead, so the container is visibly
+# restarting rather than quietly useless.
+[ -d "$SPOOL_DIR" ] || mkdir -p "$SPOOL_DIR" 2>/dev/null || fail "cannot create $SPOOL_DIR"
+[ -d "$INBOX_DIR" ] || mkdir -p "$INBOX_DIR" 2>/dev/null || fail "cannot create $INBOX_DIR"
+[ -w "$SPOOL_DIR" ] || fail "$SPOOL_DIR is not writable by uid $(id -u). The bind mount must be owned by PUID/PGID."
+[ -w "$INBOX_DIR" ] || fail "$INBOX_DIR is not writable by uid $(id -u). The bind mount must be owned by PUID/PGID."
+
 log "watching $SPOOL_DIR (poll ${POLL_SECONDS}s), writing to $INBOX_DIR"
 command -v "$YTDLP_BIN" >/dev/null 2>&1 || log "WARNING: $YTDLP_BIN not found on PATH"
+
+claim_warned=0
 
 while :; do
   found=0
@@ -42,10 +54,16 @@ while :; do
     base="${job%.job}"
     running="$base.running"
 
-    # Claim the job. If another worker got here first, skip it.
+    # Claim the job. If another worker got here first, skip it — but if we
+    # simply cannot write, say so rather than looking idle.
     if ! mv "$job" "$running" 2>/dev/null; then
+      if [ "$claim_warned" = 0 ]; then
+        log "cannot claim $(basename "$job") — check ownership of $SPOOL_DIR"
+        claim_warned=1
+      fi
       continue
     fi
+    claim_warned=0
 
     : > "$base.log"
 

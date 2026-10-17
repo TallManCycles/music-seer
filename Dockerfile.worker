@@ -20,7 +20,10 @@ LABEL org.opencontainers.image.title="music-seer-ytdlp" \
 
 # The worker writes into the inbox, which in an arrstack is owned by the PUID
 # the rest of the stack uses. Run it as that user (set in compose) so downloads
-# do not come out root-owned.
+# do not come out root-owned. These directories exist so a *named volume*
+# mounted here inherits that ownership; bind mounts get the host's.
+RUN mkdir -p /spool /inbox && chown -R 1000:1000 /spool /inbox
+
 ENV SPOOL_DIR=/spool \
     INBOX_DIR=/inbox \
     POLL_SECONDS=5

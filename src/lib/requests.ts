@@ -6,7 +6,7 @@ import * as lidarr from "./lidarr";
 import { jellyfinReady, lidarrReady } from "./settings";
 import { enqueueFallback, pollFallback, resolveSource } from "./ytdlp";
 import * as spool from "./spool";
-import { releaseGroupForRecording } from "./musicbrainz";
+import { releaseGroupForRecording, releaseGroupForRelease } from "./musicbrainz";
 import type { CreateRequestBody, MediaRequest, MediaType, RequestStatus } from "./types";
 
 // --- status helpers --------------------------------------------------------
@@ -43,6 +43,21 @@ export async function createRequest(body: CreateRequestBody): Promise<CreateOutc
       artistMbid = artistMbid ?? resolved.artistMbid;
     } catch {
       // Best effort; the fallback path does not need an album.
+    }
+  }
+
+  // Chart entries arrive keyed by release, and Lidarr keys albums on the release
+  // group — so resolve it rather than failing the request with "no release group".
+  if (type === "album" && !releaseGroupMbid) {
+    try {
+      const resolved = await releaseGroupForRelease(mbid);
+      if (resolved) {
+        releaseGroupMbid = resolved.releaseGroupMbid;
+        albumTitle = albumTitle ?? resolved.title;
+        artist = artist || resolved.artist || "";
+      }
+    } catch {
+      // Falls through to the existing "no release group known" error.
     }
   }
 

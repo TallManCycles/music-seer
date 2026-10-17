@@ -1,4 +1,4 @@
-import { coverArtUrl } from "@/lib/musicbrainz";
+import { coverArtUrl, coverArtUrlForRelease } from "@/lib/musicbrainz";
 
 export const runtime = "nodejs";
 
@@ -17,13 +17,18 @@ const PLACEHOLDER = `<svg xmlns="http://www.w3.org/2000/svg" width="250" height=
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const mbid = url.searchParams.get("mbid");
+  // Chart entries are keyed by release; everything else by release group.
+  const release = url.searchParams.get("release");
   const size = Number(url.searchParams.get("size") ?? 250);
 
-  if (!mbid || !/^[0-9a-f-]{36}$/i.test(mbid)) {
+  const id = release ?? mbid;
+  if (!id || !/^[0-9a-f-]{36}$/i.test(id)) {
     return svg(400);
   }
 
-  const target = coverArtUrl(mbid, Number.isFinite(size) ? size : 250);
+  const target = release
+    ? coverArtUrlForRelease(release, Number.isFinite(size) ? size : 250)
+    : coverArtUrl(mbid!, Number.isFinite(size) ? size : 250);
   if (!target) return svg(400);
 
   try {

@@ -150,6 +150,33 @@ export function coverArtUrl(releaseGroupMbid: string | undefined, size = 250): s
   return `${COVER_ART}/release-group/${releaseGroupMbid}/front-${size}`;
 }
 
+/** Same archive, keyed by release rather than release group (chart data). */
+export function coverArtUrlForRelease(releaseMbid: string | undefined, size = 250): string | undefined {
+  if (!releaseMbid) return undefined;
+  return `${COVER_ART}/release/${releaseMbid}/front-${size}`;
+}
+
+/**
+ * The release group a release belongs to. Chart data is keyed by release, but
+ * Lidarr keys albums on the release group — so a chart item has to be resolved
+ * before it can be requested.
+ */
+export async function releaseGroupForRelease(
+  releaseMbid: string
+): Promise<{ releaseGroupMbid: string; title?: string; artist?: string } | null> {
+  const data = await mbFetch<{
+    "release-group"?: { id: string; title?: string; "artist-credit"?: ArtistCredit[] };
+  }>(`release/${releaseMbid}`, { inc: "release-groups+artist-credits", fmt: "json" });
+
+  const group = data["release-group"];
+  if (!group?.id) return null;
+  return {
+    releaseGroupMbid: group.id,
+    title: group.title,
+    artist: creditName(group["artist-credit"]),
+  };
+}
+
 /**
  * An artist's studio albums, by MBID (the browse endpoint, not search — so the
  * results really are that artist's albums). Used to suggest what is missing

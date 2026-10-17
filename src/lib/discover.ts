@@ -1,6 +1,12 @@
+import { config } from "./config";
 import * as db from "./db";
 import * as jellyfin from "./jellyfin";
-import { artistsByGenre, releaseGroupsForArtist, search as mbSearch } from "./musicbrainz";
+import {
+  artistsByGenre,
+  coverArtUrlForRelease,
+  releaseGroupsForArtist,
+  search as mbSearch,
+} from "./musicbrainz";
 import { jellyfinReady } from "./settings";
 import type { SearchResult } from "./types";
 
@@ -32,6 +38,15 @@ export interface ArtistSuggestion {
   requestStatus?: string;
 }
 
+/** A popular release you do not have, from ListenBrainz's sitewide chart. */
+export interface ChartSuggestion {
+  album: SearchResult;
+  reason: string;
+  listenCount: number;
+  requestId?: number;
+  requestStatus?: string;
+}
+
 export interface DiscoverResult {
   configured: boolean;
   error?: string;
@@ -41,15 +56,29 @@ export interface DiscoverResult {
   libraryArtists: number;
   suggestions: Suggestion[];
   newArtists: ArtistSuggestion[];
+  /** Albums from this year or last by artists you own. */
+  newReleases: Suggestion[];
+  /** ListenBrainz's sitewide chart, minus anything you already have. */
+  charts: ChartSuggestion[];
   /** The genres the suggestions were drawn from. */
   basedOn: string[];
 }
 
-const MAX_ARTISTS = 4;
+const MAX_ARTISTS = 8;
+/**
+ * How many of the biggest collections to consider. The shelf browses a rotating
+ * window of these rather than the same few every time: with a library of
+ * hundreds of artists, always asking about the top four makes the shelf look
+ * broken, and "the artist you own most of" is not the only thing worth
+ * suggesting.
+ */
+const POOL_SIZE = 60;
 const ALBUMS_PER_ARTIST = 25;
 /** How many of the library's top genres to look for new artists in. */
 const GENRES_FOR_DISCOVERY = 2;
 const NEW_ARTIST_LIMIT = 8;
+const NEW_RELEASE_LIMIT = 8;
+const CHART_LIMIT = 12;
 const CACHE_TTL_MS = 30 * 60 * 1000;
 
 let cache: { at: number; value: DiscoverResult } | null = null;
@@ -124,6 +153,71 @@ async function resolveArtistMbid(artist: LibraryArtist): Promise<string | undefi
   }
 }
 
+/** The ListenBrainz sitewide chart. */
+const LISTENBRAINZ = "https://api.listenbrainz.org/1";
+
+interface LbRelease {
+  release_name: string;
+  release_mbid: string;
+  artist_name: string;
+  artist_mbids?: string[];
+  caa_release_mbid?: string;
+  listen_count: number;
+}
+
+/**
+ * Chart releases from ListenBrainz, which is the only place to get a popularity
+ * signal without an API key — MusicBrainz has none, and its search rank is not
+ * the same thing.
+ *
+ * This is *global* listening, not personalised, so it is labelled as a chart
+ * rather than presented as a recommendation, and anything by an artist already
+ * in the library is dropped. One HTTP request, cached with the rest.
+ */
+async function chartSuggestions(ownedNames: Set<string>, limit: number): Promise<ChartSuggestion[]> {
+  try {
+    const res = await fetch(`${LISTENBRAINZ}/stats/sitewide/releases?range=week`, {
+      headers: { Accept: "application/json", "User-Agent": config().userAgent },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) return [];
+    const body = (await res.json()) as { payload?: { releases?: LbRelease[] } };
+
+    const out: ChartSuggestion[] = [];
+    const seen = new Set<string>();
+    for (const release of body.payload?.releases ?? []) {
+      if (!release.release_mbid || !release.release_name) continue;
+      const artistKey = jellyfin.normalizeName(release.artist_name ?? "");
+      if (!artistKey || ownedNames.has(artistKey)) continue;
+
+      // ListenBrainz charts individual releases, so the same album appears once
+      // per edition. Collapse those before showing anything.
+      const key = `${artistKey}|${jellyfin.normalizeName(release.release_name)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      out.push({
+        album: {
+          type: "album",
+          mbid: release.release_mbid,
+          title: release.release_name,
+          artist: release.artist_name,
+          artistMbid: release.artist_mbids?.[0],
+          coverUrl: coverArtUrlForRelease(release.caa_release_mbid),
+          subtitle: "Chart",
+        },
+        reason: `${release.listen_count.toLocaleString("en-AU")} listens this week`,
+        listenCount: release.listen_count,
+      });
+      if (out.length >= limit) break;
+    }
+    return out;
+  } catch {
+    // A chart is a nice-to-have; never let it break the shelf.
+    return [];
+  }
+}
+
 export async function suggestions(limit = 24): Promise<DiscoverResult> {
   if (!jellyfinReady()) {
     return {
@@ -132,6 +226,8 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
       libraryArtists: 0,
       suggestions: [],
       newArtists: [],
+      newReleases: [],
+      charts: [],
       basedOn: [],
     };
   }
@@ -139,13 +235,22 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
 
   const albums = await jellyfin.listAlbums({ limit: 1000 });
   const { artists, keys } = artistsFromLibrary(albums);
+  const windowIndex = Math.floor(Date.now() / CACHE_TTL_MS);
 
   // Artists with an id straight from Jellyfin come first, then the biggest
   // collections; the rest are resolved by name, one MusicBrainz call each.
-  const candidates = artists.slice(0, MAX_ARTISTS);
+  //
+  // The window rotates every cache period. Always browsing the same four
+  // biggest collections made the shelf look broken in a library of hundreds of
+  // artists, and "the artist you own most of" is not the only thing worth
+  // suggesting.
+  const pool = artists.slice(0, POOL_SIZE);
+  const offset = pool.length ? (windowIndex * MAX_ARTISTS) % pool.length : 0;
+  const candidates = [...pool.slice(offset), ...pool.slice(0, offset)].slice(0, MAX_ARTISTS);
 
   const pools: Suggestion[][] = [];
   const genreWeights = new Map<string, number>();
+  const recent: Array<{ album: SearchResult; artistName: string; year: number }> = [];
   let failures = 0;
   let unresolved = 0;
 
@@ -178,6 +283,17 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
       const credited = album.artist || artist.name;
       return !keys.has(albumKey(credited, album.title)) && !keys.has(albumKey(artist.name, album.title));
     });
+
+    // Albums from this year or last that the library does not have: a release
+    // you have not caught up with yet. The dates arrive with the discography,
+    // so this costs nothing extra.
+    for (const album of missing) {
+      const year = Number(album.year);
+      if (Number.isFinite(year) && year >= new Date().getFullYear() - 1) {
+        recent.push({ album, artistName: artist.name, year });
+      }
+    }
+
     if (missing.length === 0) continue;
 
     const requested = new Map(db.listRequests().map((r) => [r.mbid, r] as const));
@@ -258,6 +374,19 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
     libraryArtists: artists.length,
     suggestions: out,
     newArtists,
+    newReleases: recent
+      .sort((a, b) => b.year - a.year)
+      .slice(0, NEW_RELEASE_LIMIT)
+      .map((entry) => {
+        const existing = requested.get(entry.album.mbid);
+        return {
+          album: { ...entry.album, artist: entry.album.artist || entry.artistName },
+          reason: `New in ${entry.year} from ${entry.artistName}`,
+          requestId: existing?.id,
+          requestStatus: existing?.status,
+        };
+      }),
+    charts: await chartSuggestions(ownedNames, CHART_LIMIT),
     basedOn: topGenres,
   };
   if (out.length === 0 && unresolved > 0 && unresolved === candidates.length) {

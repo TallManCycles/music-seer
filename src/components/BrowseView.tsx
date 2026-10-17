@@ -57,6 +57,23 @@ interface NewArtist {
   requestStatus?: RequestStatus;
 }
 
+/** A recently released album from an artist already in the library. */
+interface NewRelease {
+  album: DiscoverAlbum;
+  reason: string;
+  requestId?: number;
+  requestStatus?: RequestStatus;
+}
+
+/** A globally popular release. Keyed by release mbid; `releaseGroupMbid` is absent. */
+interface ChartEntry {
+  album: DiscoverAlbum;
+  reason: string;
+  listenCount?: number;
+  requestId?: number;
+  requestStatus?: RequestStatus;
+}
+
 interface LibraryPayload {
   configured: boolean;
   total: number;
@@ -72,6 +89,10 @@ interface DiscoverPayload {
   suggestions: Suggestion[];
   /** Artists the listener does not own yet, suggested from their genres. */
   newArtists?: NewArtist[];
+  /** Recently released records from artists already in the library. */
+  newReleases?: NewRelease[];
+  /** Globally popular releases from ListenBrainz. */
+  charts?: ChartEntry[];
   /** The genres the suggestions came from, e.g. ["rock", "pop rock"]. */
   basedOn?: string[];
   error?: string;
@@ -456,6 +477,60 @@ export default function BrowseView() {
         </section>
       )}
 
+      {!needsSetup && (!discover || (discover.newReleases ?? []).length > 0) && (
+        <section className="mt-12">
+          <header className="mb-4">
+            <h2 className="text-lg font-semibold tracking-tight">New releases</h2>
+            <p className="mt-0.5 text-sm text-white/45">
+              Recent records from artists you already have — one tap to request.
+            </p>
+          </header>
+
+          {!discover ? (
+            <ShelfSkeleton count={6} />
+          ) : (
+            <ul className="flex snap-x gap-4 overflow-x-auto pb-2 scrollbar-none">
+              {(discover.newReleases ?? []).map((item) => {
+                const album = item.album;
+                const ov = overrides[keyOf(album.type, album.mbid)];
+                const requestId = ov?.requestId ?? item.requestId;
+                const requestStatus = ov?.requestStatus ?? item.requestStatus;
+                return (
+                  <li key={album.mbid} className="w-40 shrink-0 snap-start sm:w-44">
+                    <AlbumTile
+                      title={album.title}
+                      artist={album.artist}
+                      year={album.year}
+                      coverSrc={suggestionCover(album)}
+                      onOpen={() => openSuggestion(item)}
+                      onQuickRequest={
+                        requestId ? undefined : () => void requestAlbum({ ...album, coverSrc: suggestionCover(album) })
+                      }
+                      quickBusy={Boolean(ov?.busy)}
+                      quickDone={Boolean(requestId)}
+                      badge={
+                        requestId ? (
+                          requestStatus ? (
+                            <StatusBadge status={requestStatus} />
+                          ) : (
+                            <span className="rounded-full bg-ink-950/70 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-accent-soft ring-1 ring-inset ring-accent/30 backdrop-blur">
+                              Requested
+                            </span>
+                          )
+                        ) : undefined
+                      }
+                    />
+                    <p className="mt-2 line-clamp-2 text-xs leading-snug text-white/40">
+                      {item.reason}
+                    </p>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+      )}
+
       {!needsSetup && (
         <section className="mt-12">
           <header className="mb-4">
@@ -517,6 +592,60 @@ export default function BrowseView() {
                     >
                       {requestId ? "Requested" : busy ? "Requesting…" : "Request"}
                     </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
+      )}
+
+      {!needsSetup && (!discover || (discover.charts ?? []).length > 0) && (
+        <section className="mt-12">
+          <header className="mb-4">
+            <h2 className="text-lg font-semibold tracking-tight">Charts</h2>
+            <p className="mt-0.5 text-sm text-white/45">
+              What people are listening to on ListenBrainz this week — not based on your library.
+            </p>
+          </header>
+
+          {!discover ? (
+            <ShelfSkeleton count={6} />
+          ) : (
+            <ul className="flex snap-x gap-4 overflow-x-auto pb-2 scrollbar-none">
+              {(discover.charts ?? []).map((item) => {
+                const album = item.album;
+                const ov = overrides[keyOf(album.type, album.mbid)];
+                const requestId = ov?.requestId ?? item.requestId;
+                const requestStatus = ov?.requestStatus ?? item.requestStatus;
+                return (
+                  <li key={album.mbid} className="w-40 shrink-0 snap-start sm:w-44">
+                    <AlbumTile
+                      title={album.title}
+                      artist={album.artist}
+                      year={album.year}
+                      coverSrc={suggestionCover(album)}
+                      onOpen={() => openSuggestion(item)}
+                      onQuickRequest={
+                        requestId ? undefined : () => void requestAlbum({ ...album, coverSrc: suggestionCover(album) })
+                      }
+                      quickBusy={Boolean(ov?.busy)}
+                      quickDone={Boolean(requestId)}
+                      badge={
+                        requestId ? (
+                          requestStatus ? (
+                            <StatusBadge status={requestStatus} />
+                          ) : (
+                            <span className="rounded-full bg-ink-950/70 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-accent-soft ring-1 ring-inset ring-accent/30 backdrop-blur">
+                              Requested
+                            </span>
+                          )
+                        ) : undefined
+                      }
+                    />
+                    <p className="mt-2 line-clamp-2 text-xs leading-snug text-white/40">
+                      {item.reason}
+                    </p>
                   </li>
                 );
               })}

@@ -95,7 +95,8 @@ export default function SettingsView() {
       setSettings(body.settings);
       setJellyfinKey("");
       setLidarrKey("");
-      setSaved("Saved. New requests use these credentials immediately.");
+      if (body.warning) setError(body.warning);
+      else setSaved("Saved. New requests use these credentials immediately.");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

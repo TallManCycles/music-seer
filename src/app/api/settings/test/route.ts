@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { isUsableUrl, jellyfinCredentials, lidarrCredentials, normalizeUrl } from "@/lib/settings";
-import { systemStatus as jellyfinStatus } from "@/lib/jellyfin";
+import { verifyCredentials } from "@/lib/jellyfin";
 import { systemStatus as lidarrStatus } from "@/lib/lidarr";
 
 export const runtime = "nodejs";
@@ -9,7 +9,9 @@ export const dynamic = "force-dynamic";
 
 /**
  * Try the supplied (or already stored) credentials without saving them, so the
- * Settings page can say "that key works" before you commit to it.
+ * Settings page can say "that key works" before you commit to it. Both probes
+ * hit endpoints that require authentication — a public endpoint would happily
+ * report success for a key the server is rejecting.
  */
 const BodySchema = z.object({
   jellyfinUrl: z.string().optional(),
@@ -19,19 +21,7 @@ const BodySchema = z.object({
 });
 
 async function probeJellyfin(url: string, apiKey: string) {
-  if (!url || !apiKey) return { ok: false, error: "no URL or API key to test" };
-  if (!isUsableUrl(url)) return { ok: false, error: "that is not a valid http(s) URL" };
-  try {
-    const res = await fetch(`${normalizeUrl(url)}/System/Info/Public`, {
-      headers: { "X-Emby-Token": apiKey, Accept: "application/json" },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!res.ok) return { ok: false, error: `Jellyfin answered ${res.status} ${res.statusText}` };
-    const info = (await res.json()) as { Version?: string; ServerName?: string };
-    return { ok: true, detail: `${info.ServerName ?? "Jellyfin"} ${info.Version ?? ""}`.trim() };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
+  return verifyCredentials({ url, apiKey });
 }
 
 export async function POST(req: Request) {

@@ -1,4 +1,4 @@
-import { jellyfinCredentials, jellyfinReady } from "./settings";
+import { jellyfinCredentials, jellyfinReady, isUsableUrl, normalizeUrl } from "./settings";
 import type { MediaType } from "./types";
 
 /**
@@ -49,6 +49,20 @@ const ITEM_TYPES: Record<MediaType, MusicItemType> = {
 
 // --- low-level HTTP --------------------------------------------------------
 
+/**
+ * Jellyfin's documented auth is the `Authorization: MediaBrowser` header, and
+ * Jellyfin 12 no longer accepts the older `X-Emby-Token` header that 10.x
+ * servers use. Send both: 12+ reads the first, 10.x reads either. Getting this
+ * wrong looks exactly like a bad API key (a 401 on every request), which is a
+ * genuinely confusing failure to debug.
+ */
+function authHeaders(apiKey: string): Record<string, string> {
+  return {
+    Authorization: `MediaBrowser Client="music-seer", Device="server", DeviceId="music-seer", Version="0.1", Token="${apiKey}"`,
+    "X-Emby-Token": apiKey,
+  };
+}
+
 async function request<T>(
   method: "GET" | "POST",
   path: string,
@@ -67,9 +81,7 @@ async function request<T>(
   const res = await fetch(url, {
     method,
     headers: {
-      // Jellyfin accepts this alongside the longer MediaBrowser Authorization
-      // header; the API key is the whole of the auth.
-      "X-Emby-Token": cfg.apiKey,
+      ...authHeaders(cfg.apiKey),
       Accept: "application/json",
       "Content-Type": "application/json",
     },
@@ -80,7 +92,9 @@ async function request<T>(
   const text = await res.text();
   if (!res.ok) {
     throw new JellyfinError(
-      `Jellyfin ${method} ${path} -> ${res.status} ${res.statusText}`,
+      res.status === 401 || res.status === 403
+        ? `Jellyfin rejected the API key (${res.status}) for ${path}`
+        : `Jellyfin ${method} ${path} -> ${res.status} ${res.statusText}`,
       res.status,
       text.slice(0, 400)
     );
@@ -90,6 +104,33 @@ async function request<T>(
     return JSON.parse(text) as T;
   } catch {
     throw new JellyfinError(`Jellyfin returned non-JSON for ${path}`, res.status, text.slice(0, 200));
+  }
+}
+
+/**
+ * Check a URL and key against an endpoint that actually requires the key, so a
+ * rejected key is reported as such instead of looking like a healthy server.
+ * `/System/Info/Public` needs no auth and therefore cannot tell you this.
+ */
+export async function verifyCredentials(creds: {
+  url: string;
+  apiKey: string;
+}): Promise<{ ok: boolean; detail?: string; error?: string }> {
+  if (!creds.url || !creds.apiKey) return { ok: false, error: "no URL or API key to test" };
+  if (!isUsableUrl(creds.url)) return { ok: false, error: "that is not a valid http(s) URL" };
+  try {
+    const res = await fetch(`${normalizeUrl(creds.url)}/System/Info`, {
+      headers: { ...authHeaders(creds.apiKey), Accept: "application/json" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, error: "Jellyfin rejected the API key (401)" };
+    }
+    if (!res.ok) return { ok: false, error: `Jellyfin answered ${res.status} ${res.statusText}` };
+    const info = (await res.json()) as { Version?: string; ServerName?: string };
+    return { ok: true, detail: `${info.ServerName ?? "Jellyfin"} ${info.Version ?? ""}`.trim() };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -265,7 +306,7 @@ export async function imageResponse(itemId: string, size: number): Promise<Respo
   const cfg = jellyfinCredentials();
   if (!jellyfinReady()) return new Response("jellyfin not configured", { status: 400 });
   const res = await fetch(imageEndpoint(itemId, size), {
-    headers: { "X-Emby-Token": cfg.apiKey, Accept: "image/*" },
+    headers: { ...authHeaders(cfg.apiKey), Accept: "image/*" },
     signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) return new Response("no image", { status: res.status });
@@ -287,15 +328,16 @@ export async function systemStatus(): Promise<{
 }> {
   if (!jellyfinReady()) return { configured: false, reachable: false, error: "not configured" };
   try {
-    // /System/Info/Public needs no key, so this also distinguishes "down" from
-    // "bad API key".
-    const info = await request<{ Version?: string; ServerName?: string }>(
-      "GET",
-      "System/Info/Public"
-    );
+    // Deliberately /System/Info and not /System/Info/Public: the public one
+    // needs no key, so it cannot tell you the key is being rejected.
+    const info = await request<{ Version?: string; ServerName?: string }>("GET", "System/Info");
     return { configured: true, reachable: true, version: info?.Version, serverName: info?.ServerName };
   } catch (err) {
-    return { configured: true, reachable: false, error: err instanceof Error ? err.message : String(err) };
+    return {
+      configured: true,
+      reachable: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 

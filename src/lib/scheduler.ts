@@ -1,5 +1,6 @@
 import { config } from "./config";
 import * as db from "./db";
+import { scanArtists } from "./discover";
 import { reconcile, isTerminal } from "./requests";
 import { enqueueFallback, queueDepth } from "./ytdlp";
 import * as spool from "./spool";
@@ -60,6 +61,15 @@ export async function tick(): Promise<void> {
       const fresh = db.getRequest(request.id);
       if (fresh && !isTerminal(fresh.status)) await reconcile(fresh);
     }
+
+    // Keep the discovery pool warm: a few artists per tick, so GET /api/discover
+    // only ever reads it. Wrapped so a scan failure cannot break reconciliation.
+    try {
+      await scanArtists(3);
+    } catch (err) {
+      console.error("[music-seer] discover scan hook failed:", err);
+    }
+
     s.lastTick = new Date().toISOString();
     s.lastError = undefined;
   } catch (err) {

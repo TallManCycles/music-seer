@@ -19,8 +19,11 @@ import type { SearchResult } from "./types";
  * suggests music you have no reason to want; "you own four albums by this
  * artist, here is the fifth" needs no taste model to be useful.
  *
- * MusicBrainz allows about one request per second, so this is deliberately
- * capped at a handful of artists and cached in memory.
+ * MusicBrainz allows about one request per second, so the expensive part — a
+ * name search and a discography browse per artist — is done by the background
+ * scheduler (`scanArtists`) and accumulated in SQLite (`discover.pool`). A
+ * request to the shelf is then just a read plus the two cheap charts, so it is
+ * fast even on a cold cache or straight after a restart.
  */
 
 export interface Suggestion {
@@ -94,20 +97,65 @@ const CHART_FETCH = 50;
  * an empty shelf.
  */
 const CHART_TTL_MS = 5 * 60 * 1000;
-const CACHE_TTL_MS = 30 * 60 * 1000;
 
-let cache: {
-  at: number;
-  value: DiscoverResult;
+/**
+ * The MusicBrainz work is no longer cached in memory. It is accumulated in one
+ * SQLite setting and refreshed in the background, so a cold start (including
+ * after a restart) reads it instead of re-asking MusicBrainz for half a minute.
+ */
+const POOL_KEY = "discover.pool";
+/** Keep the persisted blob small: oldest suggestions are dropped first. */
+const MAX_POOL_ALBUMS = 400;
+/** Recent releases are shown newest-first; this is a ceiling on the backlog. */
+const MAX_POOL_RECENT = 60;
+
+/** One missing album the shelf can offer, stored without request state. */
+interface PoolAlbum {
+  album: SearchResult;
+  artistName: string;
+  reason: string;
+}
+
+/**
+ * Everything the expensive scan learns, persisted as one JSON blob. Request
+ * state is deliberately absent: it is attached at read time (see
+ * `suggestions`) so it can never go stale in here. The library identity is kept
+ * too, so the charts can be filtered without re-listing the library on every
+ * page load.
+ */
+interface DiscoverPool {
+  updatedAt: string;
+  /** Normalised artist names already scanned in this cycle. */
+  scanned: string[];
+  /** Missing albums from the artists scanned so far. */
+  albums: PoolAlbum[];
+  /** Missing releases from the last few years. */
+  recent: PoolAlbum[];
+  /** Genre weights accumulated from every scanned discography. */
+  genres: Record<string, number>;
+  /** Well-known artists in the library's top genres that it does not own. */
+  newArtists: Array<{ artist: SearchResult; reason: string }>;
+  /** Library identity, so the charts can be filtered on a plain read. */
   ownedNames: string[];
   ownedKeys: string[];
-  requested: Array<[string, { id: number; status: string }]>;
-} | null = null;
-let chartCache: { at: number; charts: ChartSuggestion[] } | null = null;
+  libraryAlbums: number;
+  libraryArtists: number;
+  /** Artists in the current cycle that could not be matched on MusicBrainz. */
+  unresolved: number;
+}
 
-/** Called when credentials change so a new library is not served stale advice. */
+let chartCache: { at: number; charts: ChartSuggestion[] } | null = null;
+/** Serialises scans so the scheduler and a cold-start read cannot interleave. */
+let scanning: Promise<void> | null = null;
+
+/**
+ * Called when credentials change so a new library is not served stale advice.
+ * Nothing is cached in memory any more — request state is annotated at read
+ * time and the library is re-checked on every background scan — so there is
+ * nothing to drop. Kept for the call sites in requests.ts.
+ */
 export function invalidateSuggestions(): void {
-  cache = null;
+  // No-op: see the comment above.
 }
 
 function artistOf(item: jellyfin.JellyfinItem): string {
@@ -282,6 +330,238 @@ function staleCharts(reason: string): { charts: ChartSuggestion[]; error?: strin
   return { charts: [], error: reason };
 }
 
+// --- the persisted pool ----------------------------------------------------
+
+/** Read the pool, tolerating an absent or unreadable blob. */
+function readPool(): DiscoverPool | null {
+  const raw = db.getSetting(POOL_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<DiscoverPool>;
+    return {
+      updatedAt: parsed.updatedAt ?? new Date(0).toISOString(),
+      scanned: parsed.scanned ?? [],
+      albums: parsed.albums ?? [],
+      recent: parsed.recent ?? [],
+      genres: parsed.genres ?? {},
+      newArtists: parsed.newArtists ?? [],
+      ownedNames: parsed.ownedNames ?? [],
+      ownedKeys: parsed.ownedKeys ?? [],
+      libraryAlbums: parsed.libraryAlbums ?? 0,
+      libraryArtists: parsed.libraryArtists ?? 0,
+      unresolved: parsed.unresolved ?? 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ask MusicBrainz about the next few library artists and fold the answers into
+ * the persisted pool.
+ *
+ * This is the work that used to make GET /api/discover take half a minute: a
+ * name search and a discography browse per artist, and MusicBrainz allows about
+ * one request per second. The scheduler calls it every tick, so the pool fills
+ * within seconds of boot and the route only ever reads it.
+ *
+ * It must never throw into the scheduler, and must return immediately when
+ * Jellyfin is not configured (the e2e suite runs that way and must not hang).
+ */
+export async function scanArtists(budget = 3): Promise<void> {
+  if (!jellyfinReady()) return;
+  // A scan already in flight owns the pool; join it rather than racing it and
+  // losing a write.
+  if (scanning) return scanning;
+  scanning = (async () => {
+    try {
+      await scanOnce(budget);
+    } catch (err) {
+      // Keep the previous pool rather than losing a good shelf to a blip.
+      console.error("[music-seer] discover scan failed:", err);
+    } finally {
+      scanning = null;
+    }
+  })();
+  return scanning;
+}
+
+/** Add to a pool list, deduped by album MBID and capped oldest-first. */
+function addPoolAlbum(list: PoolAlbum[], entry: PoolAlbum, cap: number): void {
+  const idx = list.findIndex((e) => e.album.mbid === entry.album.mbid);
+  if (idx !== -1) list.splice(idx, 1);
+  list.push(entry);
+  if (list.length > cap) list.splice(0, list.length - cap);
+}
+
+/** The "new artists" shelf, from the genres accumulated in the pool so far. */
+async function refreshNewArtists(
+  pool: DiscoverPool
+): Promise<Array<{ artist: SearchResult; reason: string }>> {
+  const owned = new Set(pool.ownedNames);
+  const topGenres = [...Object.entries(pool.genres)]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, GENRES_FOR_DISCOVERY)
+    .map(([name]) => name);
+
+  const out: Array<{ artist: SearchResult; reason: string }> = [];
+  const seen = new Set<string>();
+  for (const genre of topGenres) {
+    if (out.length >= NEW_ARTIST_LIMIT) break;
+    let found: SearchResult[];
+    try {
+      // Ask for more than we need: artists already in the library are filtered
+      // out afterwards, and the genre search is only one request either way.
+      found = await artistsByGenre(genre, 40);
+    } catch {
+      continue;
+    }
+    for (const candidate of found) {
+      if (out.length >= NEW_ARTIST_LIMIT) break;
+      const key = jellyfin.normalizeName(candidate.title);
+      if (!key || owned.has(key) || seen.has(key)) continue;
+      seen.add(key);
+      out.push({ artist: candidate, reason: `You listen to a lot of ${genre}` });
+    }
+  }
+  return out;
+}
+
+async function scanOnce(budget: number): Promise<void> {
+  const albums = await jellyfin.listAlbums({ limit: 1000 });
+  const { artists, keys } = artistsFromLibrary(albums);
+
+  const pool: DiscoverPool = readPool() ?? {
+    updatedAt: new Date(0).toISOString(),
+    scanned: [],
+    albums: [],
+    recent: [],
+    genres: {},
+    newArtists: [],
+    ownedNames: [],
+    ownedKeys: [],
+    libraryAlbums: 0,
+    libraryArtists: 0,
+    unresolved: 0,
+  };
+
+  // The library snapshot is cheap and always current, so refresh it every scan.
+  pool.libraryAlbums = albums.length;
+  pool.libraryArtists = artists.length;
+  pool.ownedNames = [...new Set(artists.map((a) => jellyfin.normalizeName(a.name)))];
+  pool.ownedKeys = [...keys];
+
+  // Anything now owned is no longer a suggestion. This is what makes a
+  // completed request leave the shelf, without re-scanning the artist.
+  const isOwned = (entry: PoolAlbum) =>
+    keys.has(albumKey(entry.album.artist || entry.artistName, entry.album.title)) ||
+    keys.has(albumKey(entry.artistName, entry.album.title));
+  pool.albums = pool.albums.filter((entry) => !isOwned(entry));
+  pool.recent = pool.recent.filter((entry) => !isOwned(entry));
+
+  const window = artists.slice(0, POOL_SIZE);
+  const scanned = new Set(pool.scanned);
+  let candidates = window.filter((a) => !scanned.has(jellyfin.normalizeName(a.name)));
+  if (candidates.length === 0 && window.length > 0) {
+    // The cycle is complete: start again so new releases and newly added
+    // library artists get picked up.
+    pool.scanned = [];
+    pool.unresolved = 0;
+    candidates = window;
+  }
+
+  const batch = candidates.slice(0, Math.max(0, budget));
+
+  for (const artist of batch) {
+    const normalized = jellyfin.normalizeName(artist.name);
+    const mbid = await resolveArtistMbid(artist);
+    if (!mbid) {
+      // Counted so the shelf can explain an empty result, and recorded so the
+      // cycle still advances rather than retrying the same artist forever.
+      pool.unresolved += 1;
+      pool.scanned.push(normalized);
+      continue;
+    }
+
+    let discography: Awaited<ReturnType<typeof releaseGroupsForArtist>>;
+    try {
+      discography = await releaseGroupsForArtist(mbid, ALBUMS_PER_ARTIST);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // A 404 means MusicBrainz has no such artist id — a stale or merged MBID
+      // in the library. That is not an outage, so skip it quietly.
+      if (!/MusicBrainz 404/.test(message)) {
+        console.error(`[music-seer] discography for ${artist.name} failed:`, message);
+      }
+      pool.scanned.push(normalized);
+      continue;
+    }
+
+    // Genres come from the discography call itself, so the taste profile is
+    // free. Weighted by how many of the artist's albums carry each genre.
+    for (const genre of discography.genres) {
+      pool.genres[genre.name] = (pool.genres[genre.name] ?? 0) + genre.count;
+    }
+
+    const missing = discography.albums.filter((album) => {
+      const credited = album.artist || artist.name;
+      return (
+        !keys.has(albumKey(credited, album.title)) &&
+        !keys.has(albumKey(artist.name, album.title))
+      );
+    });
+
+    const reason =
+      artist.albums === 1
+        ? `You have 1 album by ${artist.name}`
+        : `You have ${artist.albums} albums by ${artist.name}`;
+
+    for (const album of missing) {
+      // Belt and braces: a missing credit must never reach a request, so fall
+      // back to the artist we browsed.
+      const credited = { ...album, artist: album.artist || artist.name };
+      const entry: PoolAlbum = {
+        album: { ...credited, coverUrl: proxiedCover(credited) },
+        artistName: artist.name,
+        reason,
+      };
+      addPoolAlbum(pool.albums, entry, MAX_POOL_ALBUMS);
+
+      // Albums from the last few years that the library does not have: a
+      // release you have not caught up with yet. The dates arrive with the
+      // discography, so this costs nothing extra.
+      const year = Number(album.year);
+      if (Number.isFinite(year) && year >= new Date().getFullYear() - 2) {
+        addPoolAlbum(
+          pool.recent,
+          { ...entry, reason: `New in ${year} from ${artist.name}` },
+          MAX_POOL_RECENT
+        );
+      }
+    }
+
+    pool.scanned.push(normalized);
+  }
+
+  // Refresh the "new artists" shelf from the genres accumulated so far. Two
+  // requests; the genre search is the only popularity signal available.
+  pool.newArtists = await refreshNewArtists(pool);
+
+  pool.updatedAt = new Date().toISOString();
+  db.setSetting(POOL_KEY, JSON.stringify(pool));
+}
+
+/**
+ * A rotating window over the accumulated albums. The offset moves once an hour
+ * so the shelf varies without any extra work, and wraps around the whole pool.
+ */
+function rotate(albums: PoolAlbum[], limit: number): PoolAlbum[] {
+  if (albums.length === 0 || limit <= 0) return [];
+  const size = Math.min(limit, albums.length);
+  const offset = (Math.floor(Date.now() / 3600000) * limit) % albums.length;
+  return [...albums.slice(offset), ...albums.slice(0, offset)].slice(0, size);
+}
+
 export async function suggestions(limit = 24): Promise<DiscoverResult> {
   if (!jellyfinReady()) {
     return {
@@ -296,206 +576,105 @@ export async function suggestions(limit = 24): Promise<DiscoverResult> {
       basedOn: [],
     };
   }
-  if (cache && Date.now() - cache.at < CACHE_TTL_MS) {
-    // The MusicBrainz work is what costs 20-odd seconds, so that is what gets
-    // cached. Both charts are one cheap request each and change hourly, so they
-    // are fetched fresh every time — which also means a blip cannot get baked
-    // into the cache for half an hour (it did, once, for the global chart).
+
+  // Fresh install: do the expensive scan once, then read it back. Every later
+  // load — including after a restart — finds the pool already in SQLite.
+  let pool = readPool();
+  if (!pool) {
+    await scanArtists(MAX_ARTISTS);
+    pool = readPool();
+  }
+
+  // Request state is attached here, not stored, so it is never stale.
+  const requested = new Map(
+    db.listRequests().map((r) => [r.mbid, { id: r.id, status: r.status }] as const)
+  );
+
+  if (!pool) {
+    // The scan could not run (MusicBrainz down, or Jellyfin unreachable). Serve
+    // an empty shelf with an explanation rather than a 25-second hang.
     const [charts, localChart] = await Promise.all([
-      chartSuggestions(new Set(cache.ownedNames), CHART_LIMIT),
-      localCharts(
-        LOCAL_CHART_LIMIT,
-        (artist, title) => cache!.ownedKeys.includes(albumKey(artist, title)),
-        new Map(cache.requested)
-      ),
+      chartSuggestions(new Set<string>(), CHART_LIMIT),
+      localCharts(LOCAL_CHART_LIMIT, () => false, new Map()),
     ]);
-    return { ...cache.value, charts: charts.charts, chartsError: charts.error, localChart };
+    return {
+      configured: true,
+      note: "Suggestions are still being built — check back in a few minutes.",
+      libraryAlbums: 0,
+      libraryArtists: 0,
+      suggestions: [],
+      newArtists: [],
+      newReleases: [],
+      charts: charts.charts,
+      chartsError: charts.error,
+      localChart,
+      basedOn: [],
+    };
   }
 
-  const albums = await jellyfin.listAlbums({ limit: 1000 });
-  const { artists, keys } = artistsFromLibrary(albums);
-  const windowIndex = Math.floor(Date.now() / CACHE_TTL_MS);
+  const annotate = (entry: PoolAlbum): Suggestion => {
+    const existing = requested.get(entry.album.mbid);
+    return {
+      album: entry.album,
+      reason: entry.reason,
+      requestId: existing?.id,
+      requestStatus: existing?.status,
+    };
+  };
 
-  // Artists with an id straight from Jellyfin come first, then the biggest
-  // collections; the rest are resolved by name, one MusicBrainz call each.
-  //
-  // The window rotates every cache period. Always browsing the same four
-  // biggest collections made the shelf look broken in a library of hundreds of
-  // artists, and "the artist you own most of" is not the only thing worth
-  // suggesting.
-  const pool = artists.slice(0, POOL_SIZE);
-  const offset = pool.length ? (windowIndex * MAX_ARTISTS) % pool.length : 0;
-  const candidates = [...pool.slice(offset), ...pool.slice(0, offset)].slice(0, MAX_ARTISTS);
+  const out = rotate(pool.albums, limit).map(annotate);
 
-  const pools: Suggestion[][] = [];
-  const genreWeights = new Map<string, number>();
-  const recent: Array<{ album: SearchResult; artistName: string; year: number }> = [];
-  let failures = 0;
-  let unresolved = 0;
+  const newReleases = [...pool.recent]
+    .sort((a, b) => Number(b.album.year ?? 0) - Number(a.album.year ?? 0))
+    .slice(0, NEW_RELEASE_LIMIT)
+    .map(annotate);
 
-  for (const artist of candidates) {
-    const mbid = await resolveArtistMbid(artist);
-    if (!mbid) {
-      unresolved += 1;
-      continue;
-    }
+  const newArtists: ArtistSuggestion[] = pool.newArtists.map((entry) => {
+    const existing = requested.get(entry.artist.mbid);
+    return {
+      artist: entry.artist,
+      reason: entry.reason,
+      requestId: existing?.id,
+      requestStatus: existing?.status,
+    };
+  });
 
-    let discography: Awaited<ReturnType<typeof releaseGroupsForArtist>>;
-    try {
-      discography = await releaseGroupsForArtist(mbid, ALBUMS_PER_ARTIST);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      // A 404 means MusicBrainz has no such artist id — a stale or merged MBID
-      // in the library. That is not an outage, so skip it quietly rather than
-      // failing the whole shelf.
-      if (!/MusicBrainz 404/.test(message)) failures += 1;
-      continue;
-    }
-
-    // Genres come from the discography call itself, so the taste profile is
-    // free. Weighted by how many of the artist's albums carry each genre.
-    for (const genre of discography.genres) {
-      genreWeights.set(genre.name, (genreWeights.get(genre.name) ?? 0) + genre.count);
-    }
-
-    const missing = discography.albums.filter((album) => {
-      const credited = album.artist || artist.name;
-      return !keys.has(albumKey(credited, album.title)) && !keys.has(albumKey(artist.name, album.title));
-    });
-
-    // Albums from the last few years that the library does not have: a release
-    // you have not caught up with yet. The dates arrive with the discography, so
-    // this costs nothing extra — but the count is bounded by what your artists
-    // have actually put out, which is why this shelf is often the shortest.
-    for (const album of missing) {
-      const year = Number(album.year);
-      if (Number.isFinite(year) && year >= new Date().getFullYear() - 2) {
-        recent.push({ album, artistName: artist.name, year });
-      }
-    }
-
-    if (missing.length === 0) continue;
-
-    const requested = new Map(db.listRequests().map((r) => [r.mbid, r] as const));
-    pools.push(
-      missing.map((album) => {
-        const existing = requested.get(album.mbid);
-        // Belt and braces: a missing credit must never reach a request, so fall
-        // back to the artist we browsed.
-        const credited = { ...album, artist: album.artist || artist.name };
-        return {
-          album: { ...credited, coverUrl: proxiedCover(credited) },
-          reason:
-            artist.albums === 1
-              ? `You have 1 album by ${artist.name}`
-              : `You have ${artist.albums} albums by ${artist.name}`,
-          requestId: existing?.id,
-          requestStatus: existing?.status,
-        };
-      })
-    );
-  }
-
-  // Round-robin so one prolific artist cannot fill the whole shelf.
-  const out: Suggestion[] = [];
-  for (let depth = 0; out.length < limit; depth += 1) {
-    let added = false;
-    for (const pool of pools) {
-      const next = pool[depth];
-      if (!next) continue;
-      out.push(next);
-      added = true;
-      if (out.length >= limit) break;
-    }
-    if (!added) break;
-  }
-
-  // --- new artists ---------------------------------------------------------
-  // The genres this library leans on, then well-known groups in those genres
-  // that the library does not already have. MusicBrainz ranks its search by
-  // relevance, which is the only popularity signal available — so this is
-  // presented with its reason rather than as a recommendation engine.
-  const ownedNames = new Set(artists.map((a) => jellyfin.normalizeName(a.name)));
-  const topGenres = [...genreWeights.entries()]
+  const basedOn = [...Object.entries(pool.genres)]
     .sort((a, b) => b[1] - a[1])
     .slice(0, GENRES_FOR_DISCOVERY)
     .map(([name]) => name);
 
-  const requested = new Map(db.listRequests().map((r) => [r.mbid, r] as const));
-  const newArtists: ArtistSuggestion[] = [];
-  const seenArtists = new Set<string>();
-
-  for (const genre of topGenres) {
-    if (newArtists.length >= NEW_ARTIST_LIMIT) break;
-    let found: SearchResult[];
-    try {
-      // Ask for more than we need: artists already in the library are filtered
-      // out afterwards, and the genre search is only one request either way.
-      found = await artistsByGenre(genre, 40);
-    } catch {
-      continue;
-    }
-    for (const candidate of found) {
-      if (newArtists.length >= NEW_ARTIST_LIMIT) break;
-      const key = jellyfin.normalizeName(candidate.title);
-      if (!key || ownedNames.has(key) || seenArtists.has(key)) continue;
-      seenArtists.add(key);
-      const existing = requested.get(candidate.mbid);
-      newArtists.push({
-        artist: candidate,
-        reason: `You listen to a lot of ${genre}`,
-        requestId: existing?.id,
-        requestStatus: existing?.status,
-      });
-    }
-  }
-
-  const chartResult = await chartSuggestions(ownedNames, CHART_LIMIT);
+  // The two charts are the only live work left, and they are one cheap request
+  // each — fetched fresh, in parallel, so a blip cannot be baked in.
+  const ownedKeys = new Set(pool.ownedKeys);
+  const [charts, localChart] = await Promise.all([
+    chartSuggestions(new Set(pool.ownedNames), CHART_LIMIT),
+    localCharts(
+      LOCAL_CHART_LIMIT,
+      (artist, title) => ownedKeys.has(albumKey(artist, title)),
+      requested
+    ),
+  ]);
 
   const value: DiscoverResult = {
     configured: true,
-    libraryAlbums: albums.length,
-    libraryArtists: artists.length,
+    libraryAlbums: pool.libraryAlbums,
+    libraryArtists: pool.libraryArtists,
     suggestions: out,
     newArtists,
-    newReleases: recent
-      .sort((a, b) => b.year - a.year)
-      .slice(0, NEW_RELEASE_LIMIT)
-      .map((entry) => {
-        const existing = requested.get(entry.album.mbid);
-        return {
-          album: { ...entry.album, artist: entry.album.artist || entry.artistName, coverUrl: proxiedCover(entry.album) },
-          reason: `New in ${entry.year} from ${entry.artistName}`,
-          requestId: existing?.id,
-          requestStatus: existing?.status,
-        };
-      }),
-    charts: chartResult.charts,
-    chartsError: chartResult.error,
-    localChart: await localCharts(
-      LOCAL_CHART_LIMIT,
-      (artist, title) => keys.has(albumKey(artist, title)),
-      requested
-    ),
-    basedOn: topGenres,
+    newReleases,
+    charts: charts.charts,
+    chartsError: charts.error,
+    localChart,
+    basedOn,
   };
-  if (out.length === 0 && unresolved > 0 && unresolved === candidates.length) {
+
+  if (pool.albums.length === 0 && pool.newArtists.length === 0 && pool.unresolved > 0) {
     // Empty for a reason the user can act on, so say so rather than showing a
     // blank shelf.
     value.note =
       "None of the artists in your library could be matched on MusicBrainz by name, so there is nothing to compare against. Turning on MusicBrainz metadata in Jellyfin makes this exact rather than a name guess.";
   }
-  // Only cache a result that is not simply "MusicBrainz was down".
-  if (!(failures > 0 && failures === candidates.length && out.length === 0)) {
-    cache = {
-    at: Date.now(),
-    value,
-    ownedNames: [...ownedNames],
-    ownedKeys: [...keys],
-    requested: [...requested.entries()].map(([k, v]) => [k, { id: v.id, status: v.status }]),
-  };
-  } else {
-    value.error = "Could not reach MusicBrainz to build suggestions";
-  }
+
   return value;
 }

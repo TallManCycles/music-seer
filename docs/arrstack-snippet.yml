@@ -85,3 +85,29 @@
   #     gluetun:
   #       condition: service_healthy
   #       restart: true
+
+  # --- Variant: named volumes instead of bind mounts for data and spool ------
+  # The two directories above are app-internal state, and bind mounts are the
+  # one thing that can fail here: if docker creates the host directory itself it
+  # is owned by root, while these containers run as uid 1000, and the app then
+  # cannot create its database.
+  #
+  # A named volume inherits the ownership of the directory in the image (which
+  # is 1000), so this works with no chown and no sudo:
+  #
+  #   music-seer:
+  #     volumes:
+  #       - music-seer-data:/app/data
+  #       - music-seer-spool:/app/spool
+  #
+  #   music-seer-ytdlp:
+  #     volumes:
+  #       - music-seer-spool:/spool
+  #       - /mnt/nas/aaron/music-inbox:/inbox
+  #       - /media/aaron/local/arrstack/music-seer/ytdlp-config:/config
+  #
+  # and at the bottom of the file, alongside `networks:`:
+  #
+  #   volumes:
+  #     music-seer-data:
+  #     music-seer-spool:

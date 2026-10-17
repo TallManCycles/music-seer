@@ -212,6 +212,13 @@ its `networks:` entry.
    mkdir -p data spool && sudo chown -R 1000:1000 data spool
    ```
 
+   Or avoid the problem entirely by using **named volumes** for those two
+   directories — a named volume inherits the ownership of the directory in the
+   image, so no `chown` is needed. The inbox and config stay bind mounts (they
+   are on your NAS and already owned by the right user). See
+   [`docs/arrstack-snippet.yml`](docs/arrstack-snippet.yml) for the block to
+   paste.
+
 2. **Lidarr's root folder is its own container path.** In a gluetun setup Lidarr
    has no hostname of its own either — it answers on `http://gluetun:8686`, not
    `http://lidarr:8686`.

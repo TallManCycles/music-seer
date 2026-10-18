@@ -167,7 +167,12 @@ export function buildYtdlpArgs(sources: string[], opts: YtdlpArgOptions = {}): s
     String.raw`\s*[\(\[][^\)\]]*(Official|Lyric|Audio|Video|Visuali[sz]er|Clean|Free Download)[^\)\]]*[\)\]]`,
     "",
     "--output",
-    `${y.inboxContainerPath}/%(meta_artist)s - %(meta_title)s [%(id)s].%(ext)s`,
+    // An album download goes into its own folder. Loose files give an importer
+    // no album boundary, which is why a per-track album used to become one
+    // single-track "album" per file.
+    `${y.inboxContainerPath}/${
+      opts.album ? `${folderLiteral(`${opts.album.artist} - ${opts.album.title}`)}/` : ""
+    }%(meta_artist)s - %(meta_title)s [%(id)s].%(ext)s`,
     // Machine-readable bits we parse back out.
     "--print",
     "after_move:filepath",
@@ -361,6 +366,20 @@ function metaLiteral(value: string): string {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 200);
+}
+
+/**
+ * A literal used as a directory name in the output template. Path separators
+ * would silently create extra nesting, so they are removed rather than escaped.
+ */
+function folderLiteral(value: string): string {
+  return value
+    .replace(/[\r\n\t]/g, " ")
+    .replace(/[\\/:*?"<>|]/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/^[.\s]+|[.\s]+$/g, "")
+    .trim()
+    .slice(0, 120);
 }
 
 export function queueDepth(): { jobsRunning: number; jobsQueued: number } {
